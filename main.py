@@ -105,10 +105,9 @@ data["revenue"] = data.get("revenue", 0.0)
 save_lock = asyncio.Lock()
 
 # CLEAR SEEN CACHE ON START + 5 MINUTE TTL
+# 5 MINUTE SEEN CACHE (NO CLEAR ON RESTART)
 now = time.time()
-seen = {k: v for k, v in seen.items() if now - v < 300}  # 5 mins
-seen.clear()  # REMOVE AFTER FIRST TEST
-log.info("SEEN CACHE CLEARED — WILL SEE NEW TOKENS NOW")
+seen = {k: v for k, v in seen.items() if now - v < 300}  # 5 mins only
 data["seen"] = seen
 
 def save_data(data):
