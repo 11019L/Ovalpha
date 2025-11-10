@@ -67,6 +67,9 @@ def load_data():
     if DATA_FILE.is_file():
         try:
             raw = json.loads(DATA_FILE.read_text())
+            for mint, state in raw.get("token_state", {}).items():
+                if "sent" in state:
+                    state["sent"] = set(state["sent"])
             for u in raw.get("users", {}).values():
                 u.setdefault("free_alerts", 3)
                 u.setdefault("paid", False)
@@ -81,7 +84,12 @@ def load_data():
 
 def save_data(data):
     try:
-        DATA_FILE.write_text(json.dumps(data, indent=2))
+        # CONVERT SETS TO LISTS
+        saveable = data.copy()
+        for mint, state in saveable.get("token_state", {}).items():
+            if "sent" in state:
+                state["sent"] = list(state["sent"])
+        DATA_FILE.write_text(json.dumps(saveable, indent=2))
     except Exception as e:
         log.error(f"Save error: {e}")
 
