@@ -191,8 +191,8 @@ async def premium_pump_scanner(app: Application):
             try:
                 await asyncio.sleep(random.uniform(8, 15))
 
-                # REAL DEXSCREENER ENDPOINT
-                url = "https://api.dexscreener.com/latest/dex/search?q=pump.fun"
+                # FORCE SEARCH FOR PUMP.FUN TOKENS
+                url = "https://api.dexscreener.com/latest/dex/search?q=pump.fun&chain=solana"
 
                 async with sess.get(url, timeout=15) as r:
                     if r.status == 429:
