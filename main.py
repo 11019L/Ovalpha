@@ -99,7 +99,9 @@ def load_data():
 
 data = load_data()
 users = data["users"]
-seen = data["seen"]
+# seen is in-memory only — never saved
+seen = {}
+log.info("SEEN CACHE: Fresh in-memory (5 min TTL)")
 token_state = data["token_state"]
 data["revenue"] = data.get("revenue", 0.0)
 save_lock = asyncio.Lock()
@@ -107,13 +109,15 @@ save_lock = asyncio.Lock()
 # 5 MINUTE SEEN CACHE — NO CLEAR, NO OLD DATA
 now = time.time()
 seen = {k: v for k, v in seen.items() if now - v < 300}  # 5 mins only
-data["seen"] = seen
 
 # TEMP: LOG SEEN SIZE FOR DEBUG
 log.info(f"SEEN CACHE: {len(seen)} tokens (will ignore for 5 mins)")
+
 def save_data(data):
     try:
         saveable = data.copy()
+        # DO NOT SAVE 'seen' — it's temporary
+        saveable.pop("seen", None)
         for mint, state in saveable.get("token_state", {}).items():
             if "sent" in state:
                 state["sent"] = list(state["sent"])
