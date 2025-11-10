@@ -145,54 +145,127 @@ def format_alert(sym, addr, liq, fdv, vol, level, extra=""):
 #                             SAFETY + WHALE BUY
 # --------------------------------------------------------------------------- #
 async def is_safe_pump(mint: str, sess) -> bool:
+    """
+    Check if token is safe:
+    - dev_bought == False
+    - mint_authority == None
+    OR fallback to DexScreener LP > $100
+    """
     try:
-        async with sess.get(f"{PUMPFUN_API}/tokens/{mint}") as r:
+        # 1. Check pump.fun API
+        async with sess.get(f"{PUMPFUN_API}/tokens/{mint}", timeout=10) as r:
             if r.status == 200:
                 data = await r.json()
-                return data.get("dev_bought") is False and data.get("mint_authority") is None
-        return False
-    except:
-        return False
+                dev_safe = data.get("dev_bought") is False
+                mint_safe = data.get("mint_authority") is None
+                if dev_safe and mint_safe:
+                    return True
 
-        # DEXSCREENER LP BURN CHECK
-        async with sess.get(f"https://api.dexscreener.com/latest/dex/tokens/{mint}") as r:
+        # 2. Fallback: DexScreener LP burn check
+        async with sess.get(f"https://api.dexscreener.com/latest/dex/tokens/{mint}", timeout=10) as r:
             if r.status == 200:
                 pairs = (await r.json()).get("pairs", [])
                 for p in pairs:
-                    if p.get("liquidity", {}).get("usd", 0) > 100:
+                    liq = p.get("liquidity", {}).get("usd", 0)
+                    if liq > 100:
                         return True
         return False
-    except:
+
+    except Exception as e:
+        log.debug(f"is_safe_pump failed for {mint}: {e}")
         return False
 
-async def detect_large_buy(mint: str, sess) -> float:
-    try:
-        url = f"https://public-api.birdeye.so/defi/history_transactions?address={mint}&type=buy&limit=5"
-        headers = {"X-API-KEY": "YOUR_BIRDEYE_KEY"}  # Get free key at birdeye.so
-        async with sess.get(url, headers=headers) as r:
-            if r.status != 200: return 0
-            txs = (await r.json()).get("data", [])
-            largest = max((t.get("usdAmount", 0) for t in txs if t.get("usdAmount", 0) > 0), default=0)
-            return largest
-    except:
-        return 0
-        for sig in sigs:
-            async with sess.post(SOLANA_RPC, json={"jsonrpc":"2.0","id":1,
-                "method":"getTransaction","params":[sig["signature"],{"encoding":"jsonParsed"}]}) as tx:
-                tx_data = await tx.json()
-                if not tx_data.get("result"): continue
-                pre, post = tx_data["result"]["meta"].get("preTokenBalances", []), tx_data["result"]["meta"].get("postTokenBalances", [])
-                for bal in pre:
-                    if bal.get("mint") != mint: continue
-                    post_bal = next((p for p in post if p.get("uiTokenAmount",{}).get("uiAmount")==bal["uiTokenAmount"]["uiAmount"]), None)
-                    if not post_bal: continue
-                    bought = bal["uiTokenAmount"]["uiAmount"] - post_bal["uiTokenAmount"]["uiAmount"]
-                    if bought > 0 and bought * price > largest:
-                        largest = bought * price
-        return largest
-    except Exception:
-        return 0
 
+async def detect_large_buy(mint: str, sess) -> float:
+    """
+    Detect largest buy in last 5 txs via Birdeye
+    Fallback: Manual Solana RPC parsing (slow but accurate)
+    """
+    # === OPTION 1: Birdeye API (fast, recommended) ===
+    if BIRDEYE_KEY and BIRDEYE_KEY != "YOUR_BIRDEYE_KEY":
+        try:
+            url = "https://public-api.birdeye.so/defi/history_transactions"
+            params = {"address": mint, "type": "buy", "limit": 5}
+            headers = {"X-API-KEY": BIRDEYE_KEY}
+            async with sess.get(url, params=params, headers=headers, timeout=10) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    amounts = [t.get("usdAmount", 0) for t in data.get("data", []) if t.get("usdAmount", 0) > 0]
+                    return max(amounts) if amounts else 0
+        except Exception as e:
+            log.debug(f"Birdeye failed: {e}")
+
+    # === OPTION 2: Manual Solana RPC (fallback, slower) ===
+    try:
+        # Get pair address from DexScreener
+        async with sess.get(f"https://api.dexscreener.com/latest/dex/tokens/{mint}", timeout=10) as r:
+            if r.status != 200:
+                return 0
+            pair = next((p for p in (await r.json()).get("pairs", []) if p.get("quoteToken", {}).get("symbol") == "SOL"), None)
+            if not pair:
+                return 0
+            pair_addr = pair["pairAddress"]
+            price = pair.get("priceUsd", 0)
+            if price <= 0:
+                return 0
+
+        # Get recent signatures
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getSignaturesForAddress",
+            "params": [pair_addr, {"limit": 5}]
+        }
+        async with sess.post(SOLANA_RPC, json=payload, timeout=15) as r:
+            if r.status != 200:
+                return 0
+            sigs = (await r.json()).get("result", [])
+
+        largest = 0.0
+        for sig in sigs:
+            tx_payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getTransaction",
+                "params": [sig["signature"], {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}]
+            }
+            async with sess.post(SOLANA_RPC, json=tx_payload, timeout=15) as tx:
+                tx_data = await tx.json()
+                result = tx_data.get("result")
+                if not result:
+                    continue
+
+                pre = result["meta"].get("preTokenBalances", [])
+                post = result["meta"].get("postTokenBalances", [])
+
+                for bal in pre:
+                    if bal.get("mint") != mint:
+                        continue
+                    owner = bal.get("owner")
+                    if not owner:
+                        continue
+
+                    # Find matching post balance
+                    post_bal = next(
+                        (p for p in post
+                         if p.get("mint") == mint and p.get("owner") == owner),
+                        None
+                    )
+                    if not post_bal:
+                        continue
+
+                    pre_amt = bal["uiTokenAmount"].get("uiAmount", 0)
+                    post_amt = post_bal["uiTokenAmount"].get("uiAmount", 0)
+                    bought = pre_amt - post_amt
+                    if bought > 0:
+                        usd_value = bought * price
+                        if usd_value > largest:
+                            largest = usd_value
+        return largest
+
+    except Exception as e:
+        log.debug(f"Manual whale detect failed for {mint}: {e}")
+        return 0
 # --------------------------------------------------------------------------- #
 #                               SCANNERS (with debug logs)
 # --------------------------------------------------------------------------- #
