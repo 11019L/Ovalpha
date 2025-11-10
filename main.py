@@ -49,8 +49,6 @@ ETHERSCAN_KEY = os.getenv("ETHERSCAN_KEY", "")
 DATA_FILE = Path("data.json")
 SAVE_INTERVAL = 30
 SOLANA_RPC = "https://api.mainnet-beta.solana.com"
-PUMPFUN_TOKENS = "https://pump.fun/api/tokens"
-PUMPFUN_TOKEN = "https://pump.fun/api/token"
 DEXSCREENER_SEARCH = "https://api.dexscreener.com/latest/dex/search"
 DEXSCREENER_TOKEN = "https://api.dexscreener.com/latest/dex/tokens"
 
@@ -267,47 +265,65 @@ async def premium_pump_scanner(app: Application):
                 await asyncio.sleep(random.uniform(9, 13))
                 tokens = []
 
-                async with sess.get(PUMPFUN_TOKENS, timeout=12) as r:
-                    if r.status == 200:
-                        raw = await r.json()
-                        tokens = raw.get("tokens", [])[:100]
+                # PRIMARY: DexScreener search for "pump.fun"
+                log.info("Fetching from DexScreener...")
+                async with sess.get(
+                    DEXSCREENER_SEARCH,
+                    params={"q": "pump.fun", "chainId": "solana"},
+                    timeout=15
+                ) as r:
+                    if r.status == 429:
+                        log.warning("Rate limited. Sleeping 60s...")
+                        await asyncio.sleep(60)
+                        continue
+                    if r.status != 100:
+                        log.error(f"DexScreener error: {r.status}")
+                        await asyncio.sleep(30)
+                        continue
+                    data = await r.json()
+                    pairs = data.get("pairs", [])[:100]
 
-                if len(tokens) < 30:
-                    async with sess.get(DEXSCREENER_SEARCH, params={"q": "pump.fun", "chainId": "solana"}, timeout=12) as r:
-                        if r.status == 200:
-                            ds = await r.json()
-                            for p in ds.get("pairs", [])[:50]:
-                                base = p.get("baseToken")
-                                if not base or "pump.fun" not in p.get("url", ""): continue
-                                mint = base["address"]
-                                if any(t.get("mint") == mint for t in tokens): continue
-                                tokens.append({
-                                    "mint": mint,
-                                    "symbol": base["symbol"][:20],
-                                    "fdv": float(p.get("fdv", 0) or 0),
-                                    "liq": float(p.get("liquidity", {}).get("usd", 0) or 0),
-                                    "vol5": float(p.get("volume", {}).get("m5", 0) or 0),
-                                })
+                log.info(f"Found {len(pairs)} pump.fun pairs on DexScreener")
 
-                log.info(f"Fetched {len(tokens)} tokens")
+                for p in pairs:
+                    if "pump.fun" not in p.get("url", ""):
+                        continue
+                    base = p.get("baseToken")
+                    if not base:
+                        continue
+                    mint = base["address"]
+                    if mint in seen:
+                        continue
+
+                    tokens.append({
+                        "mint": mint,
+                        "symbol": base["symbol"][:20],
+                        "fdv": float(p.get("fdv", 0) or 0),
+                        "liq": float(p.get("liquidity", {}).get("usd", 0) or 0),
+                        "vol5": float(p.get("volume", {}).get("m5", 0) or 0),
+                    })
+
+                log.info(f"Filtered {len(tokens)} new pump.fun tokens")
+
                 processed = 0
-
                 for t in tokens:
-                    mint = t.get("mint")
-                    if not mint or mint in seen: continue
+                    mint = t["mint"]
                     seen[mint] = time.time()
 
-                    sym = t.get("symbol", "???")[:20]
-                    fdv = float(t.get("fdv", 0) or 0)
-                    liq = float(t.get("liq", 0) or 0)
-                    vol = float(t.get("vol5", 0) or 0)
+                    sym = t["symbol"]
+                    fdv = t["fdv"]
+                    liq = t["liq"]
+                    vol = t["vol5"]
 
                     log.info(f"CHECK {sym} | FDV ${fdv:,.0f} | Vol ${vol:,.0f} | Liq ${liq:,.0f}")
 
+                    # RUG CHECK
                     safe, reason = await is_rug_proof(mint, sess)
                     log.info(f"  → RUG: {'PASS' if safe else 'FAIL'} | {reason}")
-                    if not safe: continue
+                    if not safe:
+                        continue
 
+                    # WHALE
                     whale = await detect_large_buy(mint, sess)
                     if whale >= MIN_WHALE_USD:
                         msg = format_alert(sym, mint, liq, fdv, vol, "whale", f"**\\${whale:,.0f} WHALE BUY**\\n")
@@ -316,6 +332,7 @@ async def premium_pump_scanner(app: Application):
                         processed += 1
                         continue
 
+                    # VOLUME SPIKE
                     hist = volume_hist[mint]
                     hist.append(vol)
                     spike = len(hist) > 1 and vol >= (sum(hist[:-1]) / len(hist[:-1])) * 2.2
@@ -338,10 +355,10 @@ async def premium_pump_scanner(app: Application):
                             await broadcast(msg, InlineKeyboardMarkup(kb) if kb else None)
                             processed += 1
 
-                log.info(f"Scanner: {processed} alerts")
+                log.info(f"Scanner: {processed} alerts | Next in ~10s")
 
             except Exception as e:
-                log.exception(f"Scanner error: {e}")
+                log.exception(f"Scanner crash: {e}")
                 await asyncio.sleep(20)
 
 # --------------------------------------------------------------------------- #
