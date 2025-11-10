@@ -4,6 +4,7 @@ import asyncio
 import json
 import time
 import logging
+import random
 from collections import defaultdict, deque
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -183,38 +184,33 @@ async def detect_large_buy(mint: str, sess) -> float:
 # --------------------------------------------------------------------------- #
 #                               SCANNERS (with debug logs)
 # --------------------------------------------------------------------------- #
-import random
-
 async def premium_pump_scanner(app: Application):
     volume_hist = defaultdict(lambda: deque(maxlen=3))
     async with aiohttp.ClientSession() as sess:
         while True:
             try:
-                # RANDOM DELAY: 8–15 seconds
                 await asyncio.sleep(random.uniform(8, 15))
 
-                # ROTATE ENDPOINTS
-                endpoints = [
-                    "https://api.dexscreener.com/latest/dex/search?q=pump.fun",
-                    "https://api.dexscreener.com/latest/dex/tokens?pairs=pump.fun",
-                ]
-                url = random.choice(endpoints)
+                # REAL DEXSCREENER ENDPOINT
+                url = "https://api.dexscreener.com/latest/dex/search?q=pump.fun"
 
                 async with sess.get(url, timeout=15) as r:
                     if r.status == 429:
-                        log.warning("DexScreener 429 — backing off 30s")
-                        await asyncio.sleep(30)
+                        log.warning("429 — backing off 60s")
+                        await asyncio.sleep(60)
                         continue
                     if r.status != 200:
                         log.warning(f"DexScreener error: {r.status}")
                         continue
 
                     data = await r.json()
-                    pairs = data.get("pairs", []) or data.get("tokens", [])
+                    pairs = data.get("pairs", [])
 
                 tokens_processed = 0
                 for pair in pairs:
-                    if "pump.fun" not in pair.get("url", "") and pair.get("chainId") != "solana":
+                    if pair.get("chainId") != "solana":
+                        continue
+                    if float(pair.get("fdv", 0) or 0) > 100000:  # Early stage
                         continue
 
                     mint = pair["baseToken"]["address"]
@@ -230,7 +226,7 @@ async def premium_pump_scanner(app: Application):
 
                     if not await is_safe_pump(mint, sess): continue
 
-                    # WHALE
+                    # WHALE BUY
                     large = await detect_large_buy(mint, sess)
                     if large >= 1000:
                         msg = format_alert(sym, mint, liq, fdv, vol, "whale", f"**\\${large:,.0f} BUY**\\n")
@@ -273,10 +269,12 @@ async def market_pump_scanner(app: Application):
     async with aiohttp.ClientSession() as sess:
         while True:
             try:
-                await asyncio.sleep(random.uniform(12, 20))  # SLOWER
+                await asyncio.sleep(random.uniform(15, 25))
 
+                # REAL ENDPOINT FOR HIGH VOLUME
                 async with sess.get(
-                    "https://api.dexscreener.com/latest/dex/pairs/solana?rankBy=volume&order=desc&minLiquidity=10000",
+                    "https://api.dexscreener.com/latest/dex/pairs/solana",
+                    params={"minLiquidity": 10000},
                     timeout=15
                 ) as r:
                     if r.status == 429:
