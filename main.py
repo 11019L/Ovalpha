@@ -49,7 +49,7 @@ ETHERSCAN_KEY = os.getenv("ETHERSCAN_KEY", "")
 DATA_FILE = Path("data.json")          # saved next to main.py
 SAVE_INTERVAL = 30
 SOLANA_RPC = "https://api.mainnet-beta.solana.com"
-
+PUMPFUN_API = "https://frontend-api.pump.fun"
 # --------------------------------------------------------------------------- #
 #                               MARKDOWN ESCAPER
 # --------------------------------------------------------------------------- #
@@ -146,12 +146,13 @@ def format_alert(sym, addr, liq, fdv, vol, level, extra=""):
 # --------------------------------------------------------------------------- #
 async def is_safe_pump(mint: str, sess) -> bool:
     try:
-        # PUMP.FUN CHECK
-        async with sess.get(f"https://pump.fun/api/token/{mint}") as r:
+        async with sess.get(f"{PUMPFUN_API}/tokens/{mint}") as r:
             if r.status == 200:
                 data = await r.json()
-                if data.get("dev_bought") is False and data.get("mint_authority") is None:
-                    return True
+                return data.get("dev_bought") is False and data.get("mint_authority") is None
+        return False
+    except:
+        return False
 
         # DEXSCREENER LP BURN CHECK
         async with sess.get(f"https://api.dexscreener.com/latest/dex/tokens/{mint}") as r:
@@ -166,18 +167,15 @@ async def is_safe_pump(mint: str, sess) -> bool:
 
 async def detect_large_buy(mint: str, sess) -> float:
     try:
-        async with sess.get(f"https://api.dexscreener.com/latest/dex/tokens/{mint}") as r:
+        url = f"https://public-api.birdeye.so/defi/history_transactions?address={mint}&type=buy&limit=5"
+        headers = {"X-API-KEY": "YOUR_BIRDEYE_KEY"}  # Get free key at birdeye.so
+        async with sess.get(url, headers=headers) as r:
             if r.status != 200: return 0
-            pair = next((p for p in (await r.json()).get("pairs", []) if p.get("quoteToken", {}).get("symbol") == "SOL"), None)
-            if not pair: return 0
-            pair_addr = pair["pairAddress"]
-            price = pair.get("priceUsd", 0)
-
-        payload = {"jsonrpc":"2.0","id":1,"method":"getSignaturesForAddress","params":[pair_addr,{"limit":5}]}
-        async with sess.post(SOLANA_RPC, json=payload) as r:
-            sigs = (await r.json()).get("result", [])
-
-        largest = 0
+            txs = (await r.json()).get("data", [])
+            largest = max((t.get("usdAmount", 0) for t in txs if t.get("usdAmount", 0) > 0), default=0)
+            return largest
+    except:
+        return 0
         for sig in sigs:
             async with sess.post(SOLANA_RPC, json={"jsonrpc":"2.0","id":1,
                 "method":"getTransaction","params":[sig["signature"],{"encoding":"jsonParsed"}]}) as tx:
@@ -203,50 +201,58 @@ async def premium_pump_scanner(app: Application):
     async with aiohttp.ClientSession() as sess:
         while True:
             try:
-                await asyncio.sleep(random.uniform(8, 15))
+                await asyncio.sleep(random.uniform(8, 12))
 
                 tokens = []
+                offset = 0
+                limit = 50
+                total_fetched = 0
 
-                # 1. PUMP.FUN DIRECT
-                try:
-                    async with sess.get("https://pump.fun/api/tokens") as r:
-                        if r.status == 200:
-                            data = await r.json()
-                            for t in data.get("tokens", []):
-                                if t.get("mint") and t.get("dev_bought") is False:
-                                    tokens.append({
-                                        "mint": t["mint"],
-                                        "symbol": t["symbol"][:20],
-                                        "fdv": float(t.get("market_cap", 0) or 0),
-                                        "liquidity": float(t.get("liquidity", 0) or 0),
-                                        "volume_5m": float(t.get("volume_5m", 0) or 0),
-                                        "is_pumpfun": True
-                                    })
-                except Exception as e:
-                    log.warning(f"Pump.fun API error: {e}")
+                # Fetch multiple pages
+                while offset < 500:  # max 10 pages
+                    url = f"{PUMPFUN_API}/tokens"
+                    params = {
+                        "offset": offset,
+                        "limit": limit,
+                        "sort": "created_timestamp",
+                        "order": "desc",
+                        "includeNsfw": "true"
+                    }
+                    async with sess.get(url, params=params, timeout=10) as r:
+                        if r.status == 429:
+                            await asyncio.sleep(60)
+                            continue
+                        if r.status != 200:
+                            break
+                        data = await r.json()
+                        if not data:
+                            break
 
-                # 2. DEXSCREENER FALLBACK
-                try:
-                    async with sess.get("https://api.dexscreener.com/latest/dex/search?q=pump.fun&chain=solana") as r:
-                        if r.status == 200:
-                            data = await r.json()
-                            for p in data.get("pairs", []):
-                                if p.get("chainId") == "solana" and p.get("baseToken"):
-                                    tokens.append({
-                                        "mint": p["baseToken"]["address"],
-                                        "symbol": p["baseToken"]["symbol"][:20],
-                                        "fdv": float(p.get("fdv", 0) or 0),
-                                        "liquidity": float(p.get("liquidity", {}).get("usd", 0) or 0),
-                                        "volume_5m": float(p.get("volume", {}).get("m5", 0) or 0),
-                                        "is_pumpfun": "pump.fun" in p.get("url", "")
-                                    })
-                except Exception as e:
-                    log.warning(f"DexScreener error: {e}")
+                        for t in data:
+                            mint = t.get("mint")
+                            if not mint or t.get("dev_bought") is True:
+                                continue
+
+                            tokens.append({
+                                "mint": mint,
+                                "symbol": t["symbol"][:20],
+                                "fdv": float(t.get("market_cap", 0) or 0),
+                                "liquidity": float(t.get("usd_market_cap", 0) or 0) * 0.006,  # approx
+                                "volume_5m": float(t.get("v24h", 0) or 0) / 288,  # rough 5m est
+                                "is_pumpfun": True
+                            })
+                        fetched = len(data)
+                        total_fetched += fetched
+                        offset += limit
+                        if fetched < limit:
+                            break
+
+                log.info(f"Fetched {total_fetched} tokens from pump.fun")
 
                 tokens_processed = 0
                 for token in tokens:
                     mint = token["mint"]
-                    if mint in seen: 
+                    if mint in seen:
                         continue
                     seen[mint] = time.time()
 
@@ -258,9 +264,10 @@ async def premium_pump_scanner(app: Application):
                     log.info(f"SCAN: {sym} | FDV ${fdv:,.0f} | Vol ${vol:,.0f} | Liq ${liq:,.0f}")
 
                     if not await is_safe_pump(mint, sess):
+                        log.info(f"  → Unsafe, skipping")
                         continue
 
-                    # WHALE
+                    # WHALE BUY
                     large = await detect_large_buy(mint, sess)
                     if large >= 1000:
                         msg = format_alert(sym, mint, liq, fdv, vol, "whale", f"**\\${large:,.0f} BUY**\\n")
@@ -268,10 +275,10 @@ async def premium_pump_scanner(app: Application):
                         await broadcast(msg, InlineKeyboardMarkup(kb))
                         continue
 
-                    # SNIPE
+                    # SNIPE LOGIC
                     hist = volume_hist[mint]
                     hist.append(vol)
-                    spike = len(hist) > 1 and vol >= sum(hist[:-1]) / len(hist[:-1]) * 2.0
+                    spike = len(hist) > 1 and vol >= (sum(hist[:-1]) / len(hist[:-1])) * 2.0
 
                     level = None
                     if fdv >= 3000 and vol < 100 and liq > 100:
@@ -292,49 +299,55 @@ async def premium_pump_scanner(app: Application):
 
                     tokens_processed += 1
 
-                log.info(f"Scanned {tokens_processed} tokens | Next scan in {random.uniform(8,15):.1f}s")
+                log.info(f"Processed {tokens_processed} new tokens | Next scan in ~10s")
 
             except Exception as e:
                 log.error(f"Scanner error: {e}")
                 await asyncio.sleep(20)
 
 async def market_pump_scanner(app: Application):
-    volume_hist = defaultdict(lambda: deque(maxlen=3))
     async with aiohttp.ClientSession() as sess:
         while True:
             try:
-                await asyncio.sleep(random.uniform(15, 25))
+                await asyncio.sleep(random.uniform(20, 30))
 
-                # REAL ENDPOINT FOR HIGH VOLUME
-                async with sess.get(
-                    "https://api.dexscreener.com/latest/dex/pairs/solana",
-                    params={"minLiquidity": 10000},
-                    timeout=15
-                ) as r:
-                    if r.status == 429:
-                        await asyncio.sleep(60)
+                # Use DexScreener trending endpoint
+                url = "https://api.dexscreener.com/latest/dex/tokens/trending"
+                async with sess.get(url, timeout=15) as r:
+                    if r.status != 200:
+                        await asyncio.sleep(30)
                         continue
-                    if r.status != 200: continue
-                    pairs = (await r.json()).get("pairs", [])
+                    data = await r.json()
+                    pairs = data.get("pairs", [])
 
                 for pair in pairs:
-                    if "pump.fun" not in pair.get("url", ""): continue
+                    if pair.get("chainId") != "solana":
+                        continue
+                    if "pump.fun" not in pair.get("url", ""):
+                        continue
+
                     mint = pair["baseToken"]["address"]
-                    if mint in seen: continue
+                    if mint in seen:
+                        continue
                     seen[mint] = time.time()
 
                     vol = float(pair.get("volume", {}).get("h1", 0) or 0)
-                    log.info(f"MARKET: {pair['baseToken']['symbol']} | Vol ${vol:,.0f}")
+                    if vol < 5000:
+                        continue
 
-                    hist = volume_hist[mint]
-                    hist.append(vol)
-                    if len(hist) < 2: continue
-                    avg = sum(hist[:-1]) / len(hist[:-1])
-                    if vol >= avg * 2.5 and vol >= 1000:
-                        fdv = float(pair.get("fdv", 0) or 0)
-                        msg = format_alert(pair["baseToken"]["symbol"], mint, 0, fdv, vol,
-                                          "market", f"**{vol/avg:.1f}x SPIKE**\\n")
-                        await broadcast(msg)
+                    fdv = float(pair.get("fdv", 0) or 0)
+                    liq = float(pair.get("liquidity", {}).get("usd", 0) or 0)
+
+                    msg = format_alert(
+                        pair["baseToken"]["symbol"][:20],
+                        mint,
+                        liq,
+                        fdv,
+                        vol,
+                        "market",
+                        f"**Trending on DexScreener**\\n"
+                    )
+                    await broadcast(msg)
 
             except Exception as e:
                 log.error(f"Market scanner error: {e}")
