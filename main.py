@@ -106,6 +106,7 @@ save_lock = asyncio.Lock()
 
 # CLEAR SEEN CACHE ON START + 5 MINUTE TTL
 # 5 MINUTE SEEN CACHE (NO CLEAR ON RESTART)
+]# 5 MINUTE SEEN CACHE — NO CLEAR ON RESTART
 now = time.time()
 seen = {k: v for k, v in seen.items() if now - v < 300}  # 5 mins only
 data["seen"] = seen
