@@ -43,7 +43,7 @@ WALLET_BSC = os.getenv("WALLET_BSC", "0xYourWallet")
 FEE_WALLET = os.getenv("FEE_WALLET")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 PRICE_PREMIUM = 29.99
-REFERRAL_COMMISSION = 0.20  # 20% — HARD-CODED
+REFERRAL_COMMISSION = 0.20  # 20%
 ETHERSCAN_KEY = os.getenv("ETHERSCAN_KEY", "")
 
 DATA_FILE = Path("data.json")
@@ -52,7 +52,7 @@ SOLANA_RPC = "https://api.mainnet-beta.solana.com"
 DEXSCREENER_SEARCH = "https://api.dexscreener.com/latest/dex/search"
 DEXSCREENER_TOKEN = "https://api.dexscreener.com/latest/dex/tokens"
 
-# Safety thresholds
+# Thresholds
 MIN_LIQUIDITY = 75
 MIN_FDVS_SNIPE = 2500
 MAX_VOL_SNIPE = 80
@@ -104,8 +104,11 @@ token_state = data["token_state"]
 data["revenue"] = data.get("revenue", 0.0)
 save_lock = asyncio.Lock()
 
+# CLEAR SEEN CACHE ON START + 5 MINUTE TTL
 now = time.time()
-seen = {k: v for k, v in seen.items() if now - v < 3600}
+seen = {k: v for k, v in seen.items() if now - v < 300}  # 5 mins
+seen.clear()  # REMOVE AFTER FIRST TEST
+log.info("SEEN CACHE CLEARED — WILL SEE NEW TOKENS NOW")
 data["seen"] = seen
 
 def save_data(data):
@@ -156,7 +159,6 @@ def format_alert(sym, addr, liq, fdv, vol, level, extra=""):
     )
     return md(base)
 
-# Referral link
 def get_referral_link(uid: int) -> str:
     username = users[uid].get("username", f"user{uid}")
     return f"https://t.me/{app.bot.username}?start=ref_{username}"
@@ -176,15 +178,12 @@ async def is_rug_proof(mint: str, sess) -> tuple[bool, str]:
                 return False, "Mint not frozen"
 
         async with sess.get(f"{DEXSCREENER_TOKEN}/{mint}", timeout=10) as r:
-            if r.status != 200:
-                return False, "No pair"
+            if r.status != 200: return False, "No pair"
             data = await r.json()
             pair = next((p for p in data.get("pairs", []) if p["quoteToken"]["symbol"] == "SOL"), None)
-            if not pair:
-                return False, "No SOL pair"
+            if not pair: return False, "No SOL pair"
             liq = pair["liquidity"]["usd"]
-            if liq < MIN_LIQUIDITY:
-                return False, f"Low liq ${liq:.0f}"
+            if liq < MIN_LIQUIDITY: return False, f"Low liq ${liq:.0f}"
             pair_addr = pair["pairAddress"]
 
         payload = {"jsonrpc": "2.0", "id": 1, "method": "getTokenLargestAccounts", "params": [pair_addr]}
@@ -198,8 +197,7 @@ async def is_rug_proof(mint: str, sess) -> tuple[bool, str]:
         async with sess.post(SOLANA_RPC, json=payload, timeout=10) as r:
             supply = await r.json()
             total = float(supply.get("result", {}).get("value", {}).get("uiAmount", 0) or 0)
-            if total == 0:
-                return False, "No supply"
+            if total == 0: return False, "No supply"
 
         payload = {"jsonrpc": "2.0", "id": 1, "method": "getTokenLargestAccounts", "params": [mint]}
         async with sess.post(SOLANA_RPC, json=payload, timeout=10) as r:
@@ -238,7 +236,7 @@ async def detect_large_buy(mint: str, sess) -> float:
             tx_payload = {"jsonrpc": "2.0", "id": 1, "method": "getTransaction", "params": [sig["signature"], {"encoding": "jsonParsed"}]}
             async with sess.post(SOLANA_RPC, json=tx_payload, timeout=15) as tx_r:
                 tx_data = await tx_r.json()
-                result = tx_data.get("result26")
+                result = tx_data.get("result")
                 if not result: continue
                 pre = result["meta"].get("preTokenBalances", [])
                 post = result["meta"].get("postTokenBalances", [])
@@ -255,7 +253,7 @@ async def detect_large_buy(mint: str, sess) -> float:
     except: return 0
 
 # --------------------------------------------------------------------------- #
-#                               SCANNER
+#                               SCANNER (DEXSCREENER ONLY)
 # --------------------------------------------------------------------------- #
 async def premium_pump_scanner(app: Application):
     volume_hist = defaultdict(lambda: deque(maxlen=4))
@@ -272,7 +270,7 @@ async def premium_pump_scanner(app: Application):
                     timeout=15
                 ) as r:
                     if r.status == 429:
-                        log.warning("Rate limited by DexScreener. Sleeping 60s...")
+                        log.warning("Rate limited. Sleeping 60s...")
                         await asyncio.sleep(60)
                         continue
                     if r.status != 200:
@@ -283,17 +281,14 @@ async def premium_pump_scanner(app: Application):
                     data = await r.json()
                     pairs = data.get("pairs", [])[:120]
 
-                log.info(f"Found {len(pairs)} pump.fun pairs on DexScreener")
+                log.info(f"Found {len(pairs)} pump.fun pairs")
 
                 for p in pairs:
-                    if "pump.fun" not in p.get("url", ""):
-                        continue
+                    if "pump.fun" not in p.get("url", ""): continue
                     base = p.get("baseToken")
-                    if not base:
-                        continue
+                    if not base: continue
                     mint = base["address"]
-                    if mint in seen:
-                        continue
+                    if mint in seen: continue
 
                     tokens.append({
                         "mint": mint,
@@ -303,7 +298,7 @@ async def premium_pump_scanner(app: Application):
                         "vol5": float(p.get("volume", {}).get("m5", 0) or 0),
                     })
 
-                log.info(f"Processing {len(tokens)} new tokens")
+                log.info(f"Processing {len(tokens)} NEW tokens")
 
                 processed = 0
                 for t in tokens:
@@ -319,10 +314,8 @@ async def premium_pump_scanner(app: Application):
 
                     safe, reason = await is_rug_proof(mint, sess)
                     log.info(f"  → RUG: {'PASS' if safe else 'FAIL'} | {reason}")
-                    if not safe:
-                        continue
+                    if not safe: continue
 
-                    # Whale
                     whale = await detect_large_buy(mint, sess)
                     if whale >= MIN_WHALE_USD:
                         msg = format_alert(sym, mint, liq, fdv, vol, "whale", f"**\\${whale:,.0f} WHALE BUY**\\n")
@@ -331,7 +324,6 @@ async def premium_pump_scanner(app: Application):
                         processed += 1
                         continue
 
-                    # Volume spike
                     hist = volume_hist[mint]
                     hist.append(vol)
                     spike = len(hist) > 1 and vol >= (sum(hist[:-1]) / len(hist[:-1])) * 2.2
@@ -354,14 +346,14 @@ async def premium_pump_scanner(app: Application):
                             await broadcast(msg, InlineKeyboardMarkup(kb) if kb else None)
                             processed += 1
 
-                log.info(f"Scanner: {processed} alerts sent | Next scan in ~10s")
+                log.info(f"Scanner: {processed} alerts sent")
 
             except Exception as e:
                 log.exception(f"Scanner crashed: {e}")
                 await asyncio.sleep(20)
 
 # --------------------------------------------------------------------------- #
-#                               REFERRAL LOGIC
+#                               REFERRAL & PAY
 # --------------------------------------------------------------------------- #
 def attribute_referral(new_uid: int, code: str):
     if not code or not code.startswith("ref_"): return
@@ -380,7 +372,6 @@ def track_commission(paid_uid: int):
         users[referrer]["commissions_earned"] += comm
         users[referrer]["referral_stats"]["paid_subs"] += 1
         data["revenue"] += PRICE_PREMIUM
-        log.info(f"Commission: ${comm:.2f} to {referrer}")
 
 # --------------------------------------------------------------------------- #
 #                               COMMANDS
@@ -409,30 +400,21 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"Premium: <code>${PRICE_PREMIUM}/mo</code>\n"
         f"Pay: <code>{WALLET_BSC}</code>\n"
         "<code>/pay TXID</code> | <code>/wallet YOUR_SOL</code>\n"
-        "<code>/refer</code> — Get link & earn 20%",
+        "<code>/refer</code> — Earn 20%",
         parse_mode="HTML"
     )
 
 async def refer(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    if uid not in users:
-        return await update.message.reply_text("Use /start first.")
+    if uid not in users: return await update.message.reply_text("Use /start first.")
     link = get_referral_link(uid)
     stats = users[uid]["referral_stats"]
     earned = users[uid]["commissions_earned"]
-    msg = (
-        f"*YOUR REF LINK*\\n"
-        f"[Share]({link})\\n\\n"
-        f"*STATS*\\n"
-        f"Joins: {stats['joins']}\\n"
-        f"Paid: {stats['paid_subs']}\\n"
-        f"Earned: \\${earned:.2f}"
-    )
+    msg = f"*YOUR LINK*\\n[Share]({link})\\n\\n*STATS*\\nJoins: {stats['joins']}\\nPaid: {stats['paid_subs']}\\nEarned: \\${earned:.2f}"
     await update.message.reply_text(md(msg), parse_mode="MarkdownV2", disable_web_page_preview=True)
 
 async def pay(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not ctx.args:
-        return await update.message.reply_text("Usage: /pay TXID")
+    if not ctx.args: return await update.message.reply_text("Usage: /pay TXID")
     txid = ctx.args[0]
     uid = update.effective_user.id
     contract = "0x55d398326f99059fF775485246999027B3197955"
@@ -456,13 +438,10 @@ async def pay(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def wallet(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    if not users[uid].get("paid"):
-        return await update.message.reply_text("Premium only.")
-    if not ctx.args:
-        return await update.message.reply_text("Usage: /wallet <addr>")
+    if not users[uid].get("paid"): return await update.message.reply_text("Premium only.")
+    if not ctx.args: return await update.message.reply_text("Usage: /wallet <addr>")
     addr = ctx.args[0].strip()
-    if len(addr) < 32:
-        return await update.message.reply_text("Invalid.")
+    if len(addr) < 32: return await update.message.reply_text("Invalid.")
     users[uid]["wallet"] = addr
     await update.message.reply_text(md(f"Wallet: `{addr[:8]}...{addr[-6:]}`"), parse_mode="MarkdownV2")
 
@@ -483,7 +462,7 @@ async def cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(md("Cancelled."))
 
 # --------------------------------------------------------------------------- #
-#                               AUTO-BUY
+#                               AUTO-BUY & BROADCAST
 # --------------------------------------------------------------------------- #
 async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -500,14 +479,11 @@ async def handle_amount(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if "pending_buy" not in users[uid]: return
     pending = users[uid]["pending_buy"]
-    if time.time() - pending["time"] > 60:
-        del users[uid]["pending_buy"]
-        return
+    if time.time() - pending["time"] > 60: del users[uid]["pending_buy"]; return
     try:
         usd = float(update.message.text.strip())
         if usd < 1: raise ValueError
-    except:
-        return await update.message.reply_text(md("Enter number"))
+    except: return await update.message.reply_text(md("Enter number"))
     mint = pending["mint"]
     del users[uid]["pending_buy"]
     async with aiohttp.ClientSession() as sess:
@@ -518,7 +494,7 @@ async def handle_amount(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         async with sess.get("https://quote-api.jup.ag/v6/quote", params=params) as r:
             quote = await r.json()
         payload = {"quoteResponse": quote, "userPublicKey": users[uid]["wallet"], "wrapAndUnwrapSol": True, "feeAccount": FEE_WALLET}
-        async with sess.post("https://quote-api.jup.ag/v6/swap", json=payload) as r:
+        async with sess.post("https://quote-api.jup.ag/v6/quote", json=payload) as r:
             swap = await r.json()
             tx = swap.get("swapTransaction")
             if tx:
@@ -526,9 +502,6 @@ async def handle_amount(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             else:
                 await update.message.reply_text(md("Swap failed."))
 
-# --------------------------------------------------------------------------- #
-#                               BROADCAST
-# --------------------------------------------------------------------------- #
 async def broadcast(msg, reply_markup=None):
     async with save_lock:
         for uid, u in list(users.items()):
@@ -564,7 +537,7 @@ async def main():
     asyncio.create_task(premium_pump_scanner(app))
     asyncio.create_task(auto_save())
 
-    log.info("ONION BOT LIVE @alwaysgamble | 20% REFERRALS ON")
+    log.info("ONION BOT LIVE @alwaysgamble | NIGERIA READY")
     await app.updater.start_polling()
     await asyncio.Event().wait()
 
