@@ -38,7 +38,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN missing in .env")
 
-MORALIS_KEY = os.getenv("MORALIS_API_KEY")
+
 WALLET_BSC = os.getenv("WALLET_BSC", "0xYourWallet")
 FEE_WALLET = os.getenv("FEE_WALLET")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
@@ -184,35 +184,37 @@ async def detect_large_buy(mint: str, sess) -> float:
 #                               SCANNERS (with debug logs)
 # --------------------------------------------------------------------------- #
 async def premium_pump_scanner(app: Application):
-    headers = {"X-API-Key": MORALIS_KEY}
     volume_hist = defaultdict(lambda: deque(maxlen=3))
     async with aiohttp.ClientSession() as sess:
         while True:
             try:
-                tokens = []
-                for endpoint in ["new", "graduated"]:
-                    async with sess.get(
-                        f"https://solana-gateway.moralis.io/token/mainnet/exchange/pumpfun/{endpoint}",
-                        headers=headers,
-                        params={"limit": 50},
-                    ) as r:
-                        if r.status == 200:
-                            tokens.extend((await r.json()).get("result", []))
-                for token in tokens:
-                    mint = token.get("tokenAddress") or token.get("mint")
-                    if not mint or mint in seen: continue
+                # GET ALL PUMP.FUN PAIRS FROM DEXSCREENER
+                async with sess.get("https://api.dexscreener.com/latest/dex/search?q=pump.fun") as r:
+                    if r.status != 200:
+                        log.warning(f"DexScreener error: {r.status}")
+                        await asyncio.sleep(10)
+                        continue
+                    pairs = (await r.json()).get("pairs", [])
+
+                tokens_processed = 0
+                for pair in pairs:
+                    if "pump.fun" not in pair.get("url", "") or pair.get("chainId") != "solana":
+                        continue
+
+                    mint = pair["baseToken"]["address"]
+                    if mint in seen: continue
                     seen[mint] = time.time()
 
-                    sym = token.get("symbol", "???")[:20]
-                    fdv = float(token.get("fullyDilutedValuation") or 0)
-                    liq = float(token.get("liquidity") or 0) or fdv * 0.12
-                    vol = float(token.get("volume_5m") or token.get("volume") or 0)
-                    if vol > 0 and not token.get("volume_5m"): vol /= 288
+                    sym = pair["baseToken"]["symbol"][:20]
+                    fdv = float(pair.get("fdv", 0) or 0)
+                    liq = float(pair.get("liquidity", {}).get("usd", 0) or 0)
+                    vol = float(pair.get("volume", {}).get("m5", 0) or 0)
 
-                    log.info(f"SCAN: {sym} | FDV ${fdv:,.0f} | Vol ${vol:,.0f}")
+                    log.info(f"SCAN: {sym} | FDV ${fdv:,.0f} | Vol ${vol:,.0f} | Liq ${liq:,.0f}")
 
                     if not await is_safe_pump(mint, sess): continue
 
+                    # WHALE BUY
                     large = await detect_large_buy(mint, sess)
                     if large >= 1000:
                         msg = format_alert(sym, mint, liq, fdv, vol, "whale", f"**\\${large:,.0f} BUY**\\n")
@@ -220,12 +222,13 @@ async def premium_pump_scanner(app: Application):
                         await broadcast(msg, InlineKeyboardMarkup(kb))
                         continue
 
+                    # SNIPE LOGIC
                     hist = volume_hist[mint]
                     hist.append(vol)
                     spike = len(hist) > 1 and vol >= sum(hist[:-1]) / len(hist[:-1]) * 2.0
 
                     level = None
-                    if fdv >= 3000 and vol < 100:
+                    if fdv >= 3000 and vol < 100 and liq > 100:
                         level = "snipe"
                     elif fdv >= 10000 and vol >= 300:
                         level = "confirm"
@@ -241,46 +244,46 @@ async def premium_pump_scanner(app: Application):
                             kb = [[InlineKeyboardButton("BUY NOW", callback_data=f"askbuy_{mint}")]] if level == "snipe" else None
                             await broadcast(msg, InlineKeyboardMarkup(kb) if kb else None)
 
+                    tokens_processed += 1
+
+                log.info(f"Scanned {tokens_processed} tokens from DexScreener")
                 await asyncio.sleep(8)
+
             except Exception as e:
-                log.error(f"premium_pump_scanner error: {e}")
+                log.error(f"Scanner error: {e}")
                 await asyncio.sleep(15)
 
 async def market_pump_scanner(app: Application):
-    headers = {"X-API-Key": MORALIS_KEY}
     volume_hist = defaultdict(lambda: deque(maxlen=3))
     async with aiohttp.ClientSession() as sess:
         while True:
             try:
-                async with sess.get(
-                    "https://solana-gateway.moralis.io/token/mainnet/exchange/pumpfun/graduated",
-                    headers=headers,
-                    params={"limit": 100, "order": "volume.desc"},
-                ) as r:
+                async with sess.get("https://api.dexscreener.com/latest/dex/pairs/solana?rankBy=volume&order=desc&minLiquidity=10000") as r:
                     if r.status != 200: continue
-                    tokens = (await r.json()).get("result", [])
-                for token in tokens:
-                    mint = token.get("tokenAddress")
-                    if not mint or mint in seen: continue
+                    pairs = (await r.json()).get("pairs", [])
+
+                for pair in pairs:
+                    if "pump.fun" not in pair.get("url", ""): continue
+                    mint = pair["baseToken"]["address"]
+                    if mint in seen: continue
                     seen[mint] = time.time()
 
-                    vol = float(token.get("volume_5m") or token.get("volume") or 0)
-                    if vol > 0 and not token.get("volume_5m"): vol /= 288
-
-                    log.info(f"MARKET: {token.get('symbol','???')} | Vol ${vol:,.0f}")
+                    vol = float(pair.get("volume", {}).get("h1", 0) or 0)
+                    log.info(f"MARKET: {pair['baseToken']['symbol']} | Vol ${vol:,.0f}")
 
                     hist = volume_hist[mint]
                     hist.append(vol)
                     if len(hist) < 2: continue
                     avg = sum(hist[:-1]) / len(hist[:-1])
                     if vol >= avg * 2.5 and vol >= 1000:
-                        fdv = float(token.get("fullyDilutedValuation") or 0)
-                        msg = format_alert(token.get("symbol","???"), mint, 0, fdv, vol,
+                        fdv = float(pair.get("fdv", 0) or 0)
+                        msg = format_alert(pair["baseToken"]["symbol"], mint, 0, fdv, vol,
                                           "market", f"**{vol/avg:.1f}x SPIKE**\\n")
                         await broadcast(msg)
+
                 await asyncio.sleep(8)
             except Exception as e:
-                log.error(f"market_pump_scanner error: {e}")
+                log.error(f"Market scanner error: {e}")
 
 # --------------------------------------------------------------------------- #
 #                               COMMANDS
