@@ -85,6 +85,24 @@ def load_data():
             log.error(f"Load error: {e}")
     return {"users": {}, "seen": {}, "token_state": {}, "tracker": {}, "revenue": 0.0}
 
+# ——————————————————————————————————————————————————————
+# LOAD DATA + CLEAN OLD SEEN TOKENS
+# ——————————————————————————————————————————————————————
+data = load_data()
+users = data["users"]
+seen = data["seen"]
+token_state = data["token_state"]
+tracker = data["tracker"]
+data["revenue"] = data.get("revenue", 0.0)
+save_lock = asyncio.Lock()
+
+# === CLEAR OLD SEEN TOKENS (so new snipes can trigger) ===
+now = time.time()
+old_count = len(seen)
+seen = {k: v for k, v in seen.items() if now - v < 3600}  # Keep only last 1 hour
+data["seen"] = seen
+log.info(f"Cleaned seen cache: {old_count} → {len(seen)} (last 1h only)")
+
 def save_data(data):
     try:
         # CONVERT SETS TO LISTS
@@ -298,6 +316,7 @@ async def premium_pump_scanner(app: Application):
                 tokens_processed = 0
                 for token in tokens:
                     mint = token["mint"]
+                    log.debug(f"Checking mint: {mint[:8]}... | Seen: {mint in seen}")
                     if mint in seen:
                         continue
                     seen[mint] = time.time()
@@ -353,59 +372,65 @@ async def premium_pump_scanner(app: Application):
                 await asyncio.sleep(20)
                 
 async def market_pump_scanner(app: Application):
-    volume_hist = defaultdict(lambda: deque(maxlen=3))
     async with aiohttp.ClientSession() as sess:
         while True:
             try:
-                await asyncio.sleep(random.uniform(15, 25))
+                await asyncio.sleep(random.uniform(20, 30))
 
-                # Use DexScreener TRENDING (safe, no NoneType)
-                async with sess.get(DEXSCREENER_TRENDING_URL, timeout=15) as r:
+                # CORRECT ENDPOINT: https://api.dexscreener.com/token-trends/v1
+                url = "https://api.dexscreener.com/token-trends/v1"
+                async with sess.get(url, timeout=15) as r:
                     if r.status == 429:
+                        log.warning("DexScreener rate limit, sleeping 60s")
                         await asyncio.sleep(60)
                         continue
                     if r.status != 200:
+                        log.warning(f"Trending API error: {r.status}")
                         await asyncio.sleep(30)
                         continue
-                    data = await r.json()
-                    pairs = data.get("pairs")  # Can be None!
-                    if not pairs:  # ← FIX: Check for None
-                        log.warning("No trending pairs data")
+
+                    raw = await r.json()
+                    trends = raw.get("trending", [])
+                    if not trends:
+                        log.info("No trending tokens right now")
                         await asyncio.sleep(30)
                         continue
-                    pairs = pairs if isinstance(pairs, list) else []  # Ensure list
+
+                log.info(f"Found {len(trends)} trending tokens")
 
                 processed = 0
-                for pair in pairs:
+                for item in trends:
+                    pair = item.get("pair", {})
                     if pair.get("chainId") != "solana":
                         continue
                     if "pump.fun" not in pair.get("url", ""):
                         continue
-                    mint = pair["baseToken"]["address"]
-                    if mint in seen:
+
+                    mint = pair["baseToken"].get("address")
+                    if not mint or mint in seen:
                         continue
                     seen[mint] = time.time()
 
-                    vol = float(pair.get("volume", {}).get("h1", 0) or 0)
-                    if vol < 1000:
+                    symbol = pair["baseToken"]["symbol"][:20]
+                    vol_1h = float(pair.get("volume", {}).get("h1", 0) or 0)
+                    fdv = float(pair.get("fdv", 0) or 0)
+                    liq = float(pair.get("liquidity", {}).get("usd", 0) or 0)
+
+                    if vol_1h < 2000:
                         continue
 
-                    log.info(f"MARKET: {pair['baseToken']['symbol']} | 1h Vol ${vol:,.0f}")
+                    # Spike detection
+                    prev_vol = volume_hist[mint][-1] if volume_hist[mint] else vol_1h
+                    volume_hist[mint].append(vol_1h)
+                    multiplier = vol_1h / prev_vol if prev_vol > 0 else 1
 
-                    hist = volume_hist[mint]
-                    hist.append(vol)
-                    if len(hist) < 2:
-                        continue
-                    avg = sum(hist[:-1]) / len(hist[:-1])
-                    if vol >= avg * 2.5:
-                        fdv = float(pair.get("fdv", 0) or 0)
-                        liq = float(pair.get("liquidity", {}).get("usd", 0) or 0)
-                        extra = f"**{vol/avg:.1f}x 1h SPIKE**\\n"
-                        msg = format_alert(pair["baseToken"]["symbol"][:20], mint, liq, fdv, vol, "market", extra)
+                    if multiplier >= 2.0:
+                        extra = f"**{multiplier:.1f}x 1h PUMP**\\n"
+                        msg = format_alert(symbol, mint, liq, fdv, vol_1h, "market", extra)
                         await broadcast(msg)
                         processed += 1
 
-                log.info(f"Market scan: {processed} trending alerts")
+                log.info(f"Market scanner: {processed} pump alerts sent")
 
             except Exception as e:
                 log.error(f"Market scanner error: {e}")
