@@ -183,22 +183,38 @@ async def detect_large_buy(mint: str, sess) -> float:
 # --------------------------------------------------------------------------- #
 #                               SCANNERS (with debug logs)
 # --------------------------------------------------------------------------- #
+import random
+
 async def premium_pump_scanner(app: Application):
     volume_hist = defaultdict(lambda: deque(maxlen=3))
     async with aiohttp.ClientSession() as sess:
         while True:
             try:
-                # GET ALL PUMP.FUN PAIRS FROM DEXSCREENER
-                async with sess.get("https://api.dexscreener.com/latest/dex/search?q=pump.fun") as r:
+                # RANDOM DELAY: 8–15 seconds
+                await asyncio.sleep(random.uniform(8, 15))
+
+                # ROTATE ENDPOINTS
+                endpoints = [
+                    "https://api.dexscreener.com/latest/dex/search?q=pump.fun",
+                    "https://api.dexscreener.com/latest/dex/tokens?pairs=pump.fun",
+                ]
+                url = random.choice(endpoints)
+
+                async with sess.get(url, timeout=15) as r:
+                    if r.status == 429:
+                        log.warning("DexScreener 429 — backing off 30s")
+                        await asyncio.sleep(30)
+                        continue
                     if r.status != 200:
                         log.warning(f"DexScreener error: {r.status}")
-                        await asyncio.sleep(10)
                         continue
-                    pairs = (await r.json()).get("pairs", [])
+
+                    data = await r.json()
+                    pairs = data.get("pairs", []) or data.get("tokens", [])
 
                 tokens_processed = 0
                 for pair in pairs:
-                    if "pump.fun" not in pair.get("url", "") or pair.get("chainId") != "solana":
+                    if "pump.fun" not in pair.get("url", "") and pair.get("chainId") != "solana":
                         continue
 
                     mint = pair["baseToken"]["address"]
@@ -214,7 +230,7 @@ async def premium_pump_scanner(app: Application):
 
                     if not await is_safe_pump(mint, sess): continue
 
-                    # WHALE BUY
+                    # WHALE
                     large = await detect_large_buy(mint, sess)
                     if large >= 1000:
                         msg = format_alert(sym, mint, liq, fdv, vol, "whale", f"**\\${large:,.0f} BUY**\\n")
@@ -246,19 +262,26 @@ async def premium_pump_scanner(app: Application):
 
                     tokens_processed += 1
 
-                log.info(f"Scanned {tokens_processed} tokens from DexScreener")
-                await asyncio.sleep(8)
+                log.info(f"Scanned {tokens_processed} tokens | Next scan in {random.uniform(8,15):.1f}s")
 
             except Exception as e:
                 log.error(f"Scanner error: {e}")
-                await asyncio.sleep(15)
+                await asyncio.sleep(20)
 
 async def market_pump_scanner(app: Application):
     volume_hist = defaultdict(lambda: deque(maxlen=3))
     async with aiohttp.ClientSession() as sess:
         while True:
             try:
-                async with sess.get("https://api.dexscreener.com/latest/dex/pairs/solana?rankBy=volume&order=desc&minLiquidity=10000") as r:
+                await asyncio.sleep(random.uniform(12, 20))  # SLOWER
+
+                async with sess.get(
+                    "https://api.dexscreener.com/latest/dex/pairs/solana?rankBy=volume&order=desc&minLiquidity=10000",
+                    timeout=15
+                ) as r:
+                    if r.status == 429:
+                        await asyncio.sleep(60)
+                        continue
                     if r.status != 200: continue
                     pairs = (await r.json()).get("pairs", [])
 
@@ -281,9 +304,9 @@ async def market_pump_scanner(app: Application):
                                           "market", f"**{vol/avg:.1f}x SPIKE**\\n")
                         await broadcast(msg)
 
-                await asyncio.sleep(8)
             except Exception as e:
                 log.error(f"Market scanner error: {e}")
+                await asyncio.sleep(30)
 
 # --------------------------------------------------------------------------- #
 #                               COMMANDS
