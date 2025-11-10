@@ -199,7 +199,7 @@ async def premium_pump_scanner(app: Application):
 
                 tokens = []
 
-                # 1. PUMP.FUN DIRECT (ALWAYS WORKS)
+                # 1. PUMP.FUN DIRECT
                 try:
                     async with sess.get("https://pump.fun/api/tokens") as r:
                         if r.status == 200:
@@ -232,7 +232,7 @@ async def premium_pump_scanner(app: Application):
                                         "volume_5m": float(p.get("volume", {}).get("m5", 0) or 0),
                                         "is_pumpfun": "pump.fun" in p.get("url", "")
                                     })
-               13 except Exception as e:
+                except Exception as e:
                     log.warning(f"DexScreener error: {e}")
 
                 tokens_processed = 0
