@@ -265,23 +265,23 @@ async def premium_pump_scanner(app: Application):
                 await asyncio.sleep(random.uniform(9, 13))
                 tokens = []
 
-                # PRIMARY: DexScreener search for "pump.fun"
-                log.info("Fetching from DexScreener...")
+                log.info("Fetching pump.fun tokens from DexScreener...")
                 async with sess.get(
                     DEXSCREENER_SEARCH,
                     params={"q": "pump.fun", "chainId": "solana"},
                     timeout=15
                 ) as r:
                     if r.status == 429:
-                        log.warning("Rate limited. Sleeping 60s...")
+                        log.warning("Rate limited by DexScreener. Sleeping 60s...")
                         await asyncio.sleep(60)
                         continue
-                    if r.status != 100:
-                        log.error(f"DexScreener error: {r.status}")
+                    if r.status != 200:
+                        log.error(f"DexScreener HTTP error: {r.status}")
                         await asyncio.sleep(30)
                         continue
+
                     data = await r.json()
-                    pairs = data.get("pairs", [])[:100]
+                    pairs = data.get("pairs", [])[:120]
 
                 log.info(f"Found {len(pairs)} pump.fun pairs on DexScreener")
 
@@ -303,7 +303,7 @@ async def premium_pump_scanner(app: Application):
                         "vol5": float(p.get("volume", {}).get("m5", 0) or 0),
                     })
 
-                log.info(f"Filtered {len(tokens)} new pump.fun tokens")
+                log.info(f"Processing {len(tokens)} new tokens")
 
                 processed = 0
                 for t in tokens:
@@ -317,13 +317,12 @@ async def premium_pump_scanner(app: Application):
 
                     log.info(f"CHECK {sym} | FDV ${fdv:,.0f} | Vol ${vol:,.0f} | Liq ${liq:,.0f}")
 
-                    # RUG CHECK
                     safe, reason = await is_rug_proof(mint, sess)
                     log.info(f"  → RUG: {'PASS' if safe else 'FAIL'} | {reason}")
                     if not safe:
                         continue
 
-                    # WHALE
+                    # Whale
                     whale = await detect_large_buy(mint, sess)
                     if whale >= MIN_WHALE_USD:
                         msg = format_alert(sym, mint, liq, fdv, vol, "whale", f"**\\${whale:,.0f} WHALE BUY**\\n")
@@ -332,7 +331,7 @@ async def premium_pump_scanner(app: Application):
                         processed += 1
                         continue
 
-                    # VOLUME SPIKE
+                    # Volume spike
                     hist = volume_hist[mint]
                     hist.append(vol)
                     spike = len(hist) > 1 and vol >= (sum(hist[:-1]) / len(hist[:-1])) * 2.2
@@ -355,10 +354,10 @@ async def premium_pump_scanner(app: Application):
                             await broadcast(msg, InlineKeyboardMarkup(kb) if kb else None)
                             processed += 1
 
-                log.info(f"Scanner: {processed} alerts | Next in ~10s")
+                log.info(f"Scanner: {processed} alerts sent | Next scan in ~10s")
 
             except Exception as e:
-                log.exception(f"Scanner crash: {e}")
+                log.exception(f"Scanner crashed: {e}")
                 await asyncio.sleep(20)
 
 # --------------------------------------------------------------------------- #
