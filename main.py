@@ -314,7 +314,7 @@ async def stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"*ADMIN DASHBOARD*\n"
         f"Users: {total}\n"
         f"Premium: {premium}\n"
-        f"Revenue: ${data['revenue']:.2f}",
+        f"Revenue: \\${data['revenue']:.2f}",
         parse_mode="MarkdownV2"
     )
 
