@@ -207,56 +207,62 @@ async def premium_pump_scanner(app: Application):
                     pairs = data.get("pairs", [])
 
                 tokens_processed = 0
-                for pair in pairs:
-                    if pair.get("chainId") != "solana":
-                        continue
-                    if float(pair.get("fdv", 0) or 0) > 100000:  # Early stage
-                        continue
+               for pair in pairs:
+    # MUST HAVE baseToken
+    if not pair.get("baseToken"): 
+        continue
+    if pair.get("chainId") != "solana":
+        continue
 
-                    mint = pair["baseToken"]["address"]
-                    if mint in seen: continue
-                    seen[mint] = time.time()
+    mint = pair["baseToken"].get("address")
+    if not mint or mint in seen: 
+        continue
+    seen[mint] = time.time()
 
-                    sym = pair["baseToken"]["symbol"][:20]
-                    fdv = float(pair.get("fdv", 0) or 0)
-                    liq = float(pair.get("liquidity", {}).get("usd", 0) or 0)
-                    vol = float(pair.get("volume", {}).get("m5", 0) or 0)
+    sym = pair["baseToken"].get("symbol", "???")[:20]
+    
+    # SAFE FLOAT CONVERSION
+    fdv = float(pair.get("fdv") or 0)
+    liq = float(pair.get("liquidity", {}).get("usd") or 0)
+    vol = float(pair.get("volume", {}).get("m5") or 0)
 
-                    log.info(f"SCAN: {sym} | FDV ${fdv:,.0f} | Vol ${vol:,.0f} | Liq ${liq:,.0f}")
+    # LOG EVERY TOKEN
+    log.info(f"SCAN: {sym} | FDV ${fdv:,.0f} | Vol ${vol:,.0f} | Liq ${liq:,.0f}")
 
-                    if not await is_safe_pump(mint, sess): continue
+    if not await is_safe_pump(mint, sess): 
+        continue
 
-                    # WHALE BUY
-                    large = await detect_large_buy(mint, sess)
-                    if large >= 1000:
-                        msg = format_alert(sym, mint, liq, fdv, vol, "whale", f"**\\${large:,.0f} BUY**\\n")
-                        kb = [[InlineKeyboardButton("BUY NOW", callback_data=f"askbuy_{mint}")]]
-                        await broadcast(msg, InlineKeyboardMarkup(kb))
-                        continue
+    # WHALE BUY
+    large = await detect_large_buy(mint, sess)
+    if large >= 1000:
+        msg = format_alert(sym, mint, liq, fdv, vol, "whale", f"**\\${large:,.0f} BUY**\\n")
+        kb = [[InlineKeyboardButton("BUY NOW", callback_data=f"askbuy_{mint}")]]
+        await broadcast(msg, InlineKeyboardMarkup(kb))
+        continue
 
-                    # SNIPE LOGIC
-                    hist = volume_hist[mint]
-                    hist.append(vol)
-                    spike = len(hist) > 1 and vol >= sum(hist[:-1]) / len(hist[:-1]) * 2.0
+    # SNIPE LOGIC
+    hist = volume_hist[mint]
+    hist.append(vol)
+    spike = len(hist) > 1 and vol >= sum(hist[:-1]) / len(hist[:-1]) * 2.0
 
-                    level = None
-                    if fdv >= 3000 and vol < 100 and liq > 100:
-                        level = "snipe"
-                    elif fdv >= 10000 and vol >= 300:
-                        level = "confirm"
-                    elif spike and vol >= 800:
-                        level = "pump"
+    level = None
+    if fdv >= 3000 and vol < 100 and liq > 100:
+        level = "snipe"
+    elif fdv >= 10000 and vol >= 300:
+        level = "confirm"
+    elif spike and vol >= 800:
+        level = "pump"
 
-                    if level:
-                        state = token_state.get(mint, {"sent": set()})
-                        if level not in state["sent"]:
-                            state["sent"].add(level)
-                            token_state[mint] = state
-                            msg = format_alert(sym, mint, liq, fdv, vol, level)
-                            kb = [[InlineKeyboardButton("BUY NOW", callback_data=f"askbuy_{mint}")]] if level == "snipe" else None
-                            await broadcast(msg, InlineKeyboardMarkup(kb) if kb else None)
+    if level:
+        state = token_state.get(mint, {"sent": set()})
+        if level not in state["sent"]:
+            state["sent"].add(level)
+            token_state[mint] = state
+            msg = format_alert(sym, mint, liq, fdv, vol, level)
+            kb = [[InlineKeyboardButton("BUY NOW", callback_data=f"askbuy_{mint}")]] if level == "snipe" else None
+            await broadcast(msg, InlineKeyboardMarkup(kb) if kb else None)
 
-                    tokens_processed += 1
+    tokens_processed += 1
 
                 log.info(f"Scanned {tokens_processed} tokens | Next scan in {random.uniform(8,15):.1f}s")
 
