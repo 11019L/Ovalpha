@@ -191,7 +191,6 @@ async def premium_pump_scanner(app: Application):
             try:
                 await asyncio.sleep(random.uniform(8, 15))
 
-                # FORCE SEARCH FOR PUMP.FUN TOKENS
                 url = "https://api.dexscreener.com/latest/dex/search?q=pump.fun&chain=solana"
 
                 async with sess.get(url, timeout=15) as r:
@@ -207,31 +206,31 @@ async def premium_pump_scanner(app: Application):
                     pairs = data.get("pairs", [])
 
                 tokens_processed = 0
-               for pair in pairs:
+                for pair in pairs:
                     # MUST HAVE baseToken
                     if not pair.get("baseToken"): 
                         continue
                     if pair.get("chainId") != "solana":
                         continue
-                
+
                     mint = pair["baseToken"].get("address")
                     if not mint or mint in seen: 
                         continue
                     seen[mint] = time.time()
-                
+
                     sym = pair["baseToken"].get("symbol", "???")[:20]
                     
                     # SAFE FLOAT CONVERSION
                     fdv = float(pair.get("fdv") or 0)
                     liq = float(pair.get("liquidity", {}).get("usd") or 0)
                     vol = float(pair.get("volume", {}).get("m5") or 0)
-                
+
                     # LOG EVERY TOKEN
                     log.info(f"SCAN: {sym} | FDV ${fdv:,.0f} | Vol ${vol:,.0f} | Liq ${liq:,.0f}")
-                
+
                     if not await is_safe_pump(mint, sess): 
                         continue
-                
+
                     # WHALE BUY
                     large = await detect_large_buy(mint, sess)
                     if large >= 1000:
@@ -239,12 +238,12 @@ async def premium_pump_scanner(app: Application):
                         kb = [[InlineKeyboardButton("BUY NOW", callback_data=f"askbuy_{mint}")]]
                         await broadcast(msg, InlineKeyboardMarkup(kb))
                         continue
-                
+
                     # SNIPE LOGIC
                     hist = volume_hist[mint]
                     hist.append(vol)
                     spike = len(hist) > 1 and vol >= sum(hist[:-1]) / len(hist[:-1]) * 2.0
-                
+
                     level = None
                     if fdv >= 3000 and vol < 100 and liq > 100:
                         level = "snipe"
@@ -252,7 +251,7 @@ async def premium_pump_scanner(app: Application):
                         level = "confirm"
                     elif spike and vol >= 800:
                         level = "pump"
-                
+
                     if level:
                         state = token_state.get(mint, {"sent": set()})
                         if level not in state["sent"]:
@@ -261,7 +260,7 @@ async def premium_pump_scanner(app: Application):
                             msg = format_alert(sym, mint, liq, fdv, vol, level)
                             kb = [[InlineKeyboardButton("BUY NOW", callback_data=f"askbuy_{mint}")]] if level == "snipe" else None
                             await broadcast(msg, InlineKeyboardMarkup(kb) if kb else None)
-                
+
                     tokens_processed += 1
 
                 log.info(f"Scanned {tokens_processed} tokens | Next scan in {random.uniform(8,15):.1f}s")
