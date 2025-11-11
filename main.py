@@ -258,7 +258,7 @@ async def premium_pump_scanner(app: Application):
     async with aiohttp.ClientSession() as sess:
         while True:
             try:
-                await asyncio.sleep(random.uniform(9, 13))
+                await asyncio.sleep(random.uniform(15, 25))  # Avoid rate limit
                 tokens = []
 
                 log.info("Fetching pump.fun tokens from DexScreener...")
@@ -268,8 +268,9 @@ async def premium_pump_scanner(app: Application):
                     timeout=15
                 ) as r:
                     if r.status == 429:
-                        log.warning("Rate limited. Sleeping 60s...")
-                        await asyncio.sleep(60)
+                        backoff = random.uniform(60, 120)
+                        log.warning(f"Rate limited by DexScreener. Backing off {backoff:.0f}s...")
+                        await asyncio.sleep(backoff)
                         continue
                     if r.status != 200:
                         log.error(f"DexScreener HTTP error: {r.status}")
