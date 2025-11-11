@@ -339,103 +339,113 @@ async def get_pair_address(mint: str, sess) -> str | None:
 async def premium_pump_scanner(app: Application):
     volume_hist = defaultdict(lambda: deque(maxlen=4))
     skip_counter = defaultdict(int)
-    last_scan_time = 0
 
     async with aiohttp.ClientSession() as sess:
         while True:
             try:
-                await asyncio.sleep(random.uniform(15, 25))  # 15-25s cycles
+                await asyncio.sleep(random.uniform(15, 25))
 
-                # === DEXSCREENER POLLING: NEW PUMP.FUN TOKENS ===
-                # Get top new pairs on pump.fun (sort by age)
-                now = time.time()
-                url = f"{DEXSCREENER_TOKEN}/search/?q=pumpfun&orderBy=pairAge&orderDir=asc&limit=50"
-                log.info(f"Dexscreener scan (time: {now:.0f})")
+                # === DEXSCREENER SEARCH: NEW PUMP.FUN PAIRS ===
+                url = "https://api.dexscreener.com/latest/dex/search?q=pumpfun&orderBy=pairAge&orderDir=asc"
+                log.info("Dexscreener scan: fetching new pump.fun pairs")
 
                 async with sess.get(url, timeout=15) as r:
                     if r.status != 200:
                         log.error(f"Dexscreener error: {r.status}")
                         await asyncio.sleep(30)
                         continue
-                    data = await r.json()
-                    new_pairs = data.get("pairs", [])[:50]
+                    raw = await r.json()
+                    pairs = raw.get("pairs") or []
+                    if not pairs:
+                        log.info("No new pairs found")
+                        await asyncio.sleep(20)
+                        continue
 
-                log.info(f"Found {len(new_pairs)} new pump.fun pairs")
-                if not new_pairs:
-                    await asyncio.sleep(20)
-                    continue
+                log.info(f"Found {len(pairs)} new pump.fun pairs")
+                now = time.time()
 
-                # Clean seen (1h)
+                # Clean seen cache
                 old = [m for m, t in seen.items() if now - t > 3600]
                 for m in old: del seen[m]
 
-                for pair in new_pairs:
-                    mint = pair.get("baseToken", {}).get("address")
-                    if not mint or mint in seen:
-                        continue
-
-                    # === 60s+ AGE FILTER ===
-                    pair_age_str = pair.get("pairAge", "0")
+                for pair in pairs:
                     try:
-                        pair_age = int(pair_age_str.split()[0]) if pair_age_str else 0  # e.g., "1m" → 1
-                        if pair_age < 1:  # <1 min
-                            skip_counter["too_new"] += 1
-                            log.debug(f"  → SKIP: {mint[:8]} {pair_age_str} old (<1m)")
+                        # === VALIDATE PAIR DATA ===
+                        base_token = pair.get("baseToken") or {}
+                        mint = base_token.get("address")
+                        if not mint or mint in seen:
                             continue
-                    except:
+
+                        # === 60s+ AGE FILTER ===
+                        pair_age = pair.get("pairAge", "0")
+                        try:
+                            age_num = int(''.join(filter(str.isdigit, pair_age))) if pair_age else 0
+                            if age_num < 60:
+                                skip_counter["too_new"] += 1
+                                log.debug(f"  → SKIP: {mint[:8]} {pair_age} old (<60s)")
+                                continue
+                        except:
+                            continue
+
+                        seen[mint] = now
+
+                        # === EXTRACT METRICS SAFELY ===
+                        sym = base_token.get("symbol", "UNKNOWN")[:20]
+                        fdv = float(pair.get("fdv", 0) or 0)
+                        liq = float(pair.get("liquidity", {}).get("usd", 0) or 0)
+                        vol_5m = float(pair.get("volume", {}).get("m5", 0) or 0)
+
+                        if fdv == 0 or liq == 0:
+                            skip_counter["bad_data"] += 1
+                            continue
+
+                        log.info(f"CHECK {sym} | FDV ${fdv:,.0f} | Vol ${vol_5m:,.0f} | Liq ${liq:,.0f}")
+
+                        pair_addr = pair.get("pairAddress")
+                        if not pair_addr:
+                            skip_counter["no_pair"] += 1
+                            continue
+
+                        # === RUG CHECK ===
+                        safe, reason = await is_rug_proof(mint, pair_addr, sess)
+                        log.info(f"  → RUG: {'PASS' if safe else 'FAIL'} | {reason}")
+                        if not safe:
+                            skip_counter["rug"] += 1
+                            continue
+
+                        # === WHALE ===
+                        whale = await detect_large_buy(mint, sess)
+                        if whale >= MIN_WHALE_USD:
+                            extra = f"**\\${whale:,.0f} WHALE BUY**\\n"
+                            msg = format_alert(sym, mint, liq, fdv, vol_5m, "whale", extra)
+                            kb = [[InlineKeyboardButton("BUY NOW", callback_data=f"askbuy_{mint}")]]
+                            await broadcast(msg, InlineKeyboardMarkup(kb))
+                            continue
+
+                        # === SNIPE LOGIC ===
+                        hist = volume_hist[mint]
+                        hist.append(vol_5m)
+                        level = None
+
+                        if fdv >= MIN_FDVS_SNIPE and vol_5m <= MAX_VOL_SNIPE:
+                            level = "snipe"
+                        elif fdv >= MIN_FDVS_CONFIRM and vol_5m >= MIN_VOL_CONFIRM:
+                            level = "confirm"
+                        elif len(hist) >= 2 and vol_5m >= hist[-2] * 3.0 and vol_5m >= MIN_VOL_PUMP:
+                            level = "pump"
+
+                        if level:
+                            state = token_state.setdefault(mint, {"sent": set()})
+                            if level not in state["sent"]:
+                                state["sent"].add(level)
+                                token_state[mint] = state
+                                kb = [[InlineKeyboardButton("BUY NOW", callback_data=f"askbuy_{mint}")]] if level == "snipe" else None
+                                msg = format_alert(sym, mint, liq, fdv, vol_5m, level)
+                                await broadcast(msg, InlineKeyboardMarkup(kb) if kb else None)
+
+                    except Exception as e:
+                        log.debug(f"Pair processing error {mint[:8] if 'mint' in locals() else 'unknown'}: {e}")
                         continue
-
-                    seen[mint] = now
-
-                    # === EXTRACT DATA FROM PAIR ===
-                    sym = pair.get("baseToken", {}).get("symbol", "UNKNOWN")[:20]
-                    fdv = float(pair.get("fdv", 0) or 0)
-                    liq = float(pair.get("liquidity", {}).get("usd", 0) or 0)
-                    vol_5m = float(pair.get("volume", {}).get("h6", 0) or 0) / 72  # Approx 5m from 6h
-
-                    log.info(f"CHECK {sym} | FDV ${fdv:,.0f} | Vol ${vol_5m:,.0f} | Liq ${liq:,.0f}")
-
-                    pair_addr = pair.get("pairAddress")
-                    if not pair_addr:
-                        skip_counter["no_pair"] += 1
-                        continue
-
-                    # === RUG CHECK ===
-                    safe, reason = await is_rug_proof(mint, pair_addr, sess)
-                    log.info(f"  → RUG: {'PASS' if safe else 'FAIL'} | {reason}")
-                    if not safe:
-                        skip_counter["rug"] += 1
-                        continue
-
-                    # === WHALE ===
-                    whale = await detect_large_buy(mint, sess)
-                    if whale >= MIN_WHALE_USD:
-                        extra = f"**\\${whale:,.0f} WHALE BUY**\\n"
-                        msg = format_alert(sym, mint, liq, fdv, vol_5m, "whale", extra)
-                        kb = [[InlineKeyboardButton("BUY NOW", callback_data=f"askbuy_{mint}")]]
-                        await broadcast(msg, InlineKeyboardMarkup(kb))
-                        continue
-
-                    # === SNIPE LOGIC ===
-                    hist = volume_hist[mint]
-                    hist.append(vol_5m)
-                    level = None
-
-                    if fdv >= MIN_FDVS_SNIPE and vol_5m <= MAX_VOL_SNIPE:
-                        level = "snipe"
-                    elif fdv >= MIN_FDVS_CONFIRM and vol_5m >= MIN_VOL_CONFIRM:
-                        level = "confirm"
-                    elif len(hist) >= 2 and vol_5m >= hist[-2] * 3.0 and vol_5m >= MIN_VOL_PUMP:
-                        level = "pump"
-
-                    if level:
-                        state = token_state.setdefault(mint, {"sent": set()})
-                        if level not in state["sent"]:
-                            state["sent"].add(level)
-                            token_state[mint] = state
-                            kb = [[InlineKeyboardButton("BUY NOW", callback_data=f"askbuy_{mint}")]] if level == "snipe" else None
-                            msg = format_alert(sym, mint, liq, fdv, vol_5m, level)
-                            await broadcast(msg, InlineKeyboardMarkup(kb) if kb else None)
 
                 log.info(f"Scanner round | Skips: {dict(skip_counter)} | Seen: {len(seen)}")
                 skip_counter.clear()
@@ -443,7 +453,6 @@ async def premium_pump_scanner(app: Application):
             except Exception as e:
                 log.exception(f"Scanner crashed: {e}")
                 await asyncio.sleep(20)
-
 # --------------------------------------------------------------------------- #
 #                               REFERRAL & PAY
 # --------------------------------------------------------------------------- #
