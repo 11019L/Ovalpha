@@ -55,6 +55,7 @@ DEXSCREENER_SEARCH = "https://api.dexscreener.com/latest/dex/search"
 DEXSCREENER_TOKEN = "https://api.dexscreener.com/latest/dex/tokens"
 PUMPFUN_TOKENS = "https://frontend-api.pump.fun/tokens?offset=0&limit=50&sort=created_timestamp&order=desc"
 BLOXROUTE_WS = "wss://pump-ny.solana.dex.blxrbdn.com/ws"
+MORALIS_URL = "https://solana-gateway.moralis.io/token/mainnet/exchange/pumpfun/new"
 
 # Thresholds
 MIN_LIQUIDITY = 75
@@ -174,9 +175,9 @@ async def is_rug_proof(mint: str, sess) -> tuple[bool, str]:
     """
     FULLY WORKING RUG CHECK FOR PUMP.FUN
     - Uses Helius RPC (fast)
-    - Uses DexScreener for pairAddress (reliable)
+    - Uses DexScreener + pump.fun URL filter
     - 3 retries + timeout
-    - No crashes
+    - DEBUG LOGS ADDED
     """
     try:
         # === 1. MINT FROZEN? ===
@@ -209,19 +210,27 @@ async def is_rug_proof(mint: str, sess) -> tuple[bool, str]:
         else:
             return False, "RPC failed"
 
-        # === 2. GET PUMP.FUN PAIR FROM DEXSCREENER ===
+        # === 2. GET PUMP.FUN PAIR FROM DEXSCREENER (USING URL) ===
         async with sess.get(f"{DEXSCREENER_TOKEN}/{mint}", timeout=10) as r:
             if r.status != 200:
                 return False, "No pair data"
             data = await r.json()
             pairs = data.get("pairs", [])
+            
+            # DEBUG: SHOW ALL PAIRS
+            log.debug(f"DexScreener response for {mint[:8]}: {len(pairs)} pairs found")
+            for p in pairs:
+                log.debug(f"  - dexId: {p.get('dexId')}, url: {p.get('url', '')[:60]}...")
+
+            # FILTER BY pump.fun IN URL (NOT dexId)
             pair = next(
-                (p for p in pairs if p.get("dexId") == "pumpfun" or "pump.fun" in p.get("url", "")),
+                (p for p in pairs if "pump.fun" in p.get("url", "")),
                 None
             )
             if not pair:
                 return False, "No pump.fun pair"
             pair_addr = pair["pairAddress"]
+            log.debug(f"Selected pump.fun pair: {pair_addr}")
 
         # === 3. LP BURNED? ===
         for attempt in range(3):
