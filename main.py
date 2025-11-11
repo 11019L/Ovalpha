@@ -413,7 +413,7 @@ async def premium_pump_scanner(app: Application):
                         continue
 
                     log.info(f"  → 120s REACHED: {mint[:8]} → PROCESSING FROM QUEUE")
-                    ready_queue.remove(mint))
+                    ready_queue.remove(mint)
 
                     # Fetch fresh data by mint
                     async with sess.get(f"https://api.dexscreener.com/latest/dex/token/{mint}", timeout=10) as r:
