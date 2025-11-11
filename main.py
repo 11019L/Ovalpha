@@ -56,6 +56,7 @@ DEXSCREENER_TOKEN = "https://api.dexscreener.com/latest/dex/tokens"
 PUMPFUN_TOKENS = "https://frontend-api.pump.fun/tokens?offset=0&limit=50&sort=created_timestamp&order=desc"
 BLOXROUTE_WS = "wss://pump-ny.solana.dex.blxrbdn.com/ws"
 MORALIS_URL = "https://solana-gateway.moralis.io/token/mainnet/exchange/pumpfun/new"
+PUMPFUN_TOKEN_DETAIL = "https://frontend-api.pump.fun/tokens/{}"
 
 # Thresholds
 MIN_LIQUIDITY = 75
@@ -171,9 +172,19 @@ def get_referral_link(uid: int) -> str:
 # --------------------------------------------------------------------------- #
 #                               RUG CHECK
 # --------------------------------------------------------------------------- #
-async def is_rug_proof(mint: str, sess, pair_addr: str) -> tuple[bool, str]:
+async def is_rug_proof(mint: str, sess) -> tuple[bool, str]:
     try:
-        # === 1. MINT FROZEN? ===
+        # === 1. GET TOKEN DETAILS FROM PUMP.FUN (INCLUDES pairAddress) ===
+        async with sess.get(PUMPFUN_TOKEN_DETAIL.format(mint), timeout=10) as r:
+            if r.status != 200:
+                return False, "No token data"
+            token_data = await r.json()
+            pair_addr = token_data.get("pair")
+            if not pair_addr:
+                return False, "No pairAddress"
+            log.debug(f"Pump.fun pair for {mint[:8]}: {pair_addr}")
+
+        # === 2. MINT FROZEN? ===
         for attempt in range(3):
             try:
                 payload = {"jsonrpc": "2.0", "id": 1, "method": "getAccountInfo", "params": [mint, {"encoding": "jsonParsed"}]}
@@ -188,7 +199,7 @@ async def is_rug_proof(mint: str, sess, pair_addr: str) -> tuple[bool, str]:
             except: pass
         else: return False, "RPC failed"
 
-        # === 2. LP BURNED? (USE pair_addr FROM MORALIS) ===
+        # === 3. LP BURNED? ===
         for attempt in range(3):
             try:
                 payload = {"jsonrpc": "2.0", "id": 1, "method": "getTokenLargestAccounts", "params": [pair_addr]}
@@ -202,7 +213,7 @@ async def is_rug_proof(mint: str, sess, pair_addr: str) -> tuple[bool, str]:
             except: pass
         else: return False, "RPC failed"
 
-        # === 3. DEV HOLDINGS < 10% ===
+        # === 4. DEV HOLDINGS < 10% ===
         for attempt in range(3):
             try:
                 payload = {"jsonrpc": "2.0", "id": 1, "method": "getTokenSupply", "params": [mint]}
@@ -304,7 +315,7 @@ async def premium_pump_scanner(app: Application):
 
                 log.info(f"Found {len(new_tokens)} NEW pump.fun tokens")
 
-                for token in new_tokens:
+                                for token in new_tokens:
                     mint = token.get("tokenAddress")
                     if not mint or mint in seen:
                         continue
@@ -312,19 +323,18 @@ async def premium_pump_scanner(app: Application):
                     seen[mint] = time.time()
 
                     sym = token.get("symbol", "UNKNOWN")[:20]
-                    fdv_raw = token.get("fullyDilutedValuation", 0)
-                    fdv = float(fdv_raw) if fdv_raw else 0.0
-                    liq_raw = token.get("liquidity", 0)
-                    liq = float(liq_raw) if liq_raw else 0.0
-                    vol_raw = token.get("volume24h", 0)
-                    vol = float(vol_raw) / 4.8 if vol_raw else 0.0  # Approximate 5m from 24h
+                    fdv = float(token.get("fullyDilutedValuation", 0) or 0)
+                    liq = float(token.get("liquidity", 0) or 0)
+                    vol = float(token.get("volume24h", 0) or 0) / 4.8
 
                     log.info(f"CHECK {sym} | FDV ${fdv:,.0f} | Vol ${vol:,.0f} | Liq ${liq:,.0f}")
 
-                    pair_addr = token.get("pairAddress")
-                    if not pair_addr:
-                        log.info(f"  → RUG: SKIP | No pairAddress in Moralis")
+                    safe, reason = await is_rug_proof(mint, sess)
+                    log.info(f"  → RUG: {'PASS' if safe else 'FAIL'} | {reason}")
+                    if not safe:
                         continue
+
+                    # ... rest of logic (whale, snipe, etc)
 
                     safe, reason = await is_rug_proof(mint, sess, pair_addr)
 
