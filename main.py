@@ -263,14 +263,7 @@ async def premium_pump_scanner(app: Application):
                 await asyncio.sleep(random.uniform(15, 25))  # Avoid rate limit
                 tokens = []
 
-                # ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
-                # ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
-                # ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
                 log.info("Fetching pump.fun tokens from DexScreener...")
-                # ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
-                # ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
-                # ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
-
                 async with sess.get(
                     DEXSCREENER_SEARCH,
                     params={
@@ -293,7 +286,7 @@ async def premium_pump_scanner(app: Application):
                     data = await r.json()
                     pairs = data.get("pairs", [])[:120]
 
-                                log.info(f"Found {len(pairs)} pump.fun pairs")
+                log.info(f"Found {len(pairs)} pairs")
 
                 for p in pairs:
                     # FILTER: pump.fun tokens ONLY
