@@ -293,11 +293,13 @@ async def premium_pump_scanner(app: Application):
                     data = await r.json()
                     pairs = data.get("pairs", [])[:120]
 
-                log.info(f"Found {len(pairs)} pairs")
+                                log.info(f"Found {len(pairs)} pump.fun pairs")
 
                 for p in pairs:
-                    if "pump.fun" not in p.get("url", ""):
+                    # FILTER: pump.fun tokens ONLY
+                    if p.get("dexId") != "pumpfun":
                         continue
+
                     base = p.get("baseToken")
                     if not base:
                         continue
