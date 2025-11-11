@@ -34,7 +34,7 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("onion")
-log.info(f"HELLO @alwaysgamble — USING RPC: {SOLANA_RPC}")
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN missing in .env")
@@ -50,6 +50,7 @@ DATA_FILE = Path("data.json")
 SAVE_INTERVAL = 30
 SOLANA_RPC = os.getenv("SOLANA_RPC", "https://api.mainnet-beta.solana.com")
 log.info(f"Using SOLANA_RPC: {SOLANA_RPC[:50]}...")  # DEBUG
+log.info(f"HELLO @alwaysgamble — USING RPC: {SOLANA_RPC}")
 DEXSCREENER_SEARCH = "https://api.dexscreener.com/latest/dex/search"
 DEXSCREENER_TOKEN = "https://api.dexscreener.com/latest/dex/tokens"
 PUMPFUN_TOKENS = "https://frontend-api.pump.fun/tokens?offset=0&limit=50&sort=created_timestamp&order=desc"
