@@ -104,7 +104,9 @@ token_state = data.get("token_state", {})
 # seen is IN-MEMORY ONLY — NEVER SAVED OR LOADED
 seen = {}
 log.info("SEEN CACHE: IN-MEMORY ONLY — NO FILE, NO LOAD")
-
+# FORCE CLEAR ON START — RAILWAY RESTARTS
+seen.clear()
+log.info("SEEN CACHE: FORCE CLEARED ON START")
 data["revenue"] = data.get("revenue", 0.0)
 save_lock = asyncio.Lock()
 
@@ -308,7 +310,8 @@ async def premium_pump_scanner(app: Application):
 
                 log.info(f"Processing {len(tokens)} NEW tokens")
                 log.info(f"DEBUG: Seen cache size: {len(seen)} | Total pairs: {len(pairs)}")
-
+                if len(seen) > 0:
+                log.info(f"SEEN MINTS: {list(seen.keys())[:3]}...")
                 processed = 0
                 for t in tokens:
                     mint = t["mint"]
