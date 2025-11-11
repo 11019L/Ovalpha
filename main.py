@@ -263,45 +263,34 @@ async def premium_pump_scanner(app: Application):
                 await asyncio.sleep(random.uniform(15, 25))  # Avoid rate limit
                 tokens = []
 
-                log.info("Fetching pump.fun tokens from DexScreener...")
-                # USE PUMPDOTFUN DEX DIRECTLY — NO SEARCH, NO CACHE
-                DEX_PUMP = "https://api.dexscreener.com/latest/dex/pairs/solana"
+                                log.info("Fetching pump.fun tokens from DexScreener...")
                 async with sess.get(
-                    DEX_PUMP,
-                    params={"pairAddresses": ",".join([
-                        # Top pump.fun pairs (update daily from pump.fun)
-                        # We'll use a fallback list + real-time fetch
-                    ])},
+                    DEXSCREENER_SEARCH,
+                    params={
+                        "q": "pump",
+                        "chainId": "solana",
+                        "t": int(time.time())  # Force fresh data
+                    },
                     timeout=15
                 ) as r:
-                    # FALLBACK: use search with cache buster
-                    if r.status != 200:
-                        log.warning("Direct pair fetch failed. Falling back to search...")
-                        async with sess.get(
-                            DEXSCREENER_SEARCH,
-                            params={"q": "pump", "chainId": "solana", "t": int(time.time())},
-                            timeout=15
-                        ) as r2:
-                            ...
                     if r.status == 429:
                         backoff = random.uniform(60, 120)
-                        log.warning(f"Rate limited by DexScreener. Backing off {backoff:.0f}s...")
+                        log.warning(f"Rate limited. Backing off {backoff:.0f}s...")
                         await asyncio.sleep(backoff)
                         continue
                     if r.status != 200:
-                        log.error(f"DexScreener HTTP error: {r.status}")
+                        log.error(f"HTTP {r.status}")
                         await asyncio.sleep(30)
                         continue
 
                     data = await r.json()
                     pairs = data.get("pairs", [])[:120]
 
-                log.info(f"Found {len(pairs)} pump.fun pairs")
+                log.info(f"Found {len(pairs)} pairs")
 
-                # === FILTER: Raydium + pumpdotfun + pump/fun in symbol ===
                 for p in pairs:
-                    if p.get("dexId") != "pumpdotfun":
-                        continue  # ONLY pumpdotfun tokens
+                    if "pump.fun" not in p.get("url", ""):
+                        continue
                     base = p.get("baseToken")
                     if not base:
                         continue
