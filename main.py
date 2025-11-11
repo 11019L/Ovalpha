@@ -380,27 +380,26 @@ async def premium_pump_scanner(app: Application):
                 for m in old: del seen[m]
 
                 # === PROCESS NEW PAIRS ===
-                for pair in pairs:
+                    for pair in pairs:
                     try:
                         base_token = pair.get("baseToken") or {}
                         mint = base_token.get("address")
-                        if not mint or mint in seen:
+                        if not mint:
                             continue
 
-                        # === 60s+ AGE FILTER ===
-                        pair_age = pair.get("pairAge", "0")
-                        try:
-                            age_num = int(''.join(filter(str.isdigit, pair_age))) if pair_age else 0
-                            if age_num < 60:
+                        # === 60s+ SINCE FIRST SEEN (BYPASS BROKEN pairAge) ===
+                        if mint in seen:
+                            if time.time() - seen[mint] < 60:
                                 skip_counter["too_new"] += 1
-                                log.debug(f"  → SKIP: {mint[:8]} {pair_age} old (<60s)")
+                                log.debug(f"  → SKIP: {mint[:8]} only {time.time() - seen[mint]:.0f}s since first seen")
                                 continue
-                        except:
+                        else:
+                            seen[mint] = time.time()
+                            skip_counter["too_new"] += 1
+                            log.debug(f"  → SKIP: {mint[:8]} first seen, waiting 60s")
                             continue
 
-                        seen[mint] = now
-
-                        # === EXTRACT METRICS ===
+                        # === NOW 60s+ OLD → PROCESS ===
                         sym = base_token.get("symbol", "UNKNOWN")[:20]
                         fdv = float(pair.get("fdv", 0) or 0)
                         liq = float(pair.get("liquidity", {}).get("usd", 0) or 0)
@@ -422,15 +421,6 @@ async def premium_pump_scanner(app: Application):
                         log.info(f"  → RUG: {'PASS' if safe else 'FAIL'} | {reason}")
                         if not safe:
                             skip_counter["rug"] += 1
-                            continue
-
-                        # === WHALE ===
-                        whale = await detect_large_buy(mint, sess)
-                        if whale >= MIN_WHALE_USD:
-                            extra = f"**\\${whale:,.0f} WHALE BUY**\\n"
-                            msg = format_alert(sym, mint, liq, fdv, vol_5m, "whale", extra)
-                            kb = [[InlineKeyboardButton("BUY NOW", callback_data=f"askbuy_{mint}")]]
-                            await broadcast(msg, InlineKeyboardMarkup(kb))
                             continue
 
                         # === SNIPE LOGIC ===
@@ -455,9 +445,8 @@ async def premium_pump_scanner(app: Application):
                                 await broadcast(msg, InlineKeyboardMarkup(kb) if kb else None)
 
                     except Exception as e:
-                        log.debug(f"Pair processing error {mint[:8] if 'mint' in locals() else 'unknown'}: {e}")
+                        log.debug(f"Pair processing error: {e}")
                         continue
-
                 log.info(f"Scanner round | Skips: {dict(skip_counter)} | Seen: {len(seen)}")
                 skip_counter.clear()
 
