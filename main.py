@@ -11,7 +11,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 load_dotenv()
-log.info(f"HELLO @alwaysgamble — USING RPC: {SOLANA_RPC}")
+
 import aiohttp
 import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -34,7 +34,7 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("onion")
-
+log.info(f"HELLO @alwaysgamble — USING RPC: {SOLANA_RPC}")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN missing in .env")
