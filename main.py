@@ -48,7 +48,8 @@ ETHERSCAN_KEY = os.getenv("ETHERSCAN_KEY", "")
 
 DATA_FILE = Path("data.json")
 SAVE_INTERVAL = 30
-SOLANA_RPC = "https://api.mainnet-beta.solana.com"
+SOLANA_RPC = os.getenv("SOLANA_RPC", "https://api.mainnet-beta.solana.com")
+log.info(f"Using SOLANA_RPC: {SOLANA_RPC[:50]}...")  # DEBUG
 DEXSCREENER_SEARCH = "https://api.dexscreener.com/latest/dex/search"
 DEXSCREENER_TOKEN = "https://api.dexscreener.com/latest/dex/tokens"
 PUMPFUN_TOKENS = "https://frontend-api.pump.fun/tokens?offset=0&limit=50&sort=created_timestamp&order=desc"
@@ -170,17 +171,29 @@ def get_referral_link(uid: int) -> str:
 # --------------------------------------------------------------------------- #
 async def is_rug_proof(mint: str, sess) -> tuple[bool, str]:
     try:
-        # 1. Check mint authority (frozen?)
-        payload = {"jsonrpc": "2.0", "id": 1, "method": "getAccountInfo", "params": [mint, {"encoding": "jsonParsed"}]}
-        async with sess.post(SOLANA_RPC, json=payload, timeout=8) as r:
-            if r.status != 200:
-                return False, "RPC down"
-            acc = await r.json()
-            if not acc.get("result", {}).get("value"):
-                return False, "Invalid mint"
-            info = acc["result"]["value"]["data"]["parsed"]["info"]
-            if info.get("mintAuthority"):
-                return False, "Mint not frozen"
+        for attempt in range(3):
+            try:
+                payload = {"jsonrpc": "2.0", "id": 1, "method": "getAccountInfo", "params": [mint, {"encoding": "jsonParsed"}]}
+                async with sess.post(SOLANA_RPC, json=payload, timeout=8) as r:
+                    if r.status == 429:
+                        log.warning("RPC rate limited. Retrying...")
+                        await asyncio.sleep(2)
+                        continue
+                    if r.status != 200:
+                        return False, f"RPC error {r.status}"
+                    acc = await r.json()
+                    if not acc.get("result", {}).get("value"):
+                        return False, "Invalid mint"
+                    info = acc["result"]["value"]["data"]["parsed"]["info"]
+                    if info.get("mintAuthority"):
+                        return False, "Mint not frozen"
+                    break  # Success
+            except asyncio.TimeoutError:
+                if attempt == 2:
+                    return False, "RPC timeout"
+                await asyncio.sleep(1)
+        else:
+            return False, "RPC failed"
 
         # 2. Check LP burn
         async with sess.get(f"{DEXSCREENER_TOKEN}/{mint}", timeout=8) as r:
