@@ -264,36 +264,77 @@ async def detect_large_buy(mint: str, sess) -> float:
 # --------------------------------------------------------------------------- #
 #                               PAIR FETCH + RETRY
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+#                               RPC PAIR DETECTION (BYPASS PUMP.FUN)
+# --------------------------------------------------------------------------- #
+async def get_pair_from_rpc(mint: str, sess) -> str | None:
+    """Fetch pair address directly from Solana RPC (pump.fun program)"""
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getProgramAccounts",
+        "params": [
+            "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",  # Pump.fun program ID
+            {
+                "encoding": "jsonParsed",
+                "filters": [
+                    {"dataSize": 165},
+                    {"memcmp": {"offset": 32, "bytes": mint}}
+                ]
+            }
+        ]
+    }
+    try:
+        async with sess.post(SOLANA_RPC, json=payload, timeout=12) as r:
+            if r.status != 200:
+                return None
+            result = await r.json()
+            accounts = result.get("result", [])
+            if accounts:
+                pair_addr = accounts[0]["pubkey"]
+                log.info(f"  → RPC PAIR FOUND: {mint[:8]} → {pair_addr[:8]}...")
+                return pair_addr
+    except Exception as e:
+        log.debug(f"RPC pair fetch error {mint[:8]}: {e}")
+    return None
+    
+# --------------------------------------------------------------------------- #
+#                               PAIR FETCH + MULTI-SOURCE
+# --------------------------------------------------------------------------- #
 async def get_pair_address(mint: str, sess) -> str | None:
-    # 1. Try Dexscreener (fastest)
-    async with sess.get(f"{DEXSCREENER_TOKEN}/{mint}", timeout=10) as r:
-        if r.status == 200:
-            ds = await r.json()
-            pair = next((p for p in ds.get("pairs", []) if p.get("dexId") == "pumpswap"), None)
-            if pair:
-                log.info(f"  → DEXSCREENER PAIR: {mint[:8]}")
-                return pair["pairAddress"]
+    # 1. Try Dexscreener (fastest, most reliable)
+    try:
+        async with sess.get(f"{DEXSCREENER_TOKEN}/{mint}", timeout=10) as r:
+            if r.status == 200:
+                ds = await r.json()
+                pair = next((p for p in ds.get("pairs", []) if p.get("dexId") == "pumpswap"), None)
+                if pair:
+                    log.info(f"  → DEXSCREENER PAIR: {mint[:8]}")
+                    return pair["pairAddress"]
+    except:
+        pass
 
-    # 2. Try Pump.fun API with delay + UA
+    # 2. Try Pump.fun API (with anti-530)
     for attempt in range(3):
         await asyncio.sleep(random.uniform(2, 5))
-        headers = {"User-Agent": f"OnionBot/{random.randint(100,999)}"}
-        async with sess.get(PUMPFUN_PAIR.format(mint), timeout=15, headers=headers) as r:
-            if r.status == 200:
-                data = await r.json()
-                if data.get("pairAddress"):
-                    return data["pairAddress"]
-            elif r.status == 530:
-                log.warning(f"  → 530 blocked (attempt {attempt+1})")
+        headers = {
+            "User-Agent": f"OnionBot/{random.randint(100,999)} (NG)",
+            "Accept": "application/json"
+        }
+        try:
+            async with sess.get(PUMPFUN_PAIR.format(mint), timeout=15, headers=headers) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    if data.get("pairAddress"):
+                        log.info(f"  → PUMP.FUN PAIR: {mint[:8]}")
+                        return data["pairAddress"]
+                elif r.status == 530:
+                    log.warning(f"  → 530 blocked (attempt {attempt+1}/3) for {mint[:8]}")
+        except:
+            pass
 
-    # 3. Try RPC
-    pair_addr = await get_pair_from_rpc(mint, sess)
-    if pair_addr:
-        log.info(f"  → RPC PAIR: {mint[:8]}")
-        return pair_addr
-
-    log.info(f"  → NO PAIR FOUND for {mint[:8]}")
-    return None
+    # 3. Final fallback: RPC
+    return await get_pair_from_rpc(mint, sess)
 
 # --------------------------------------------------------------------------- #
 #                               SCANNER
