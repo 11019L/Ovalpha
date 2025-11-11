@@ -281,28 +281,28 @@ async def premium_pump_scanner(app: Application):
 
                 log.info(f"Found {len(pairs)} pump.fun pairs")
 
-                for p in pairs:
-                # NEW FILTER: Only Raydium + pump.fun tokens
-                if p.get("dexId") not in ["raydium", "pumpdotfun"]:
-                    continue
-                base = p.get("baseToken")
-                if not base:
-                    continue
-                symbol = base.get("symbol", "").lower()
-                if "pump" not in symbol and "fun" not in symbol:
-                    continue
-            
-                mint = base["address"]
-                if mint in seen:
-                    continue
-            
-                tokens.append({
-                    "mint": mint,
-                    "symbol": base["symbol"][:20],
-                    "fdv": float(p.get("fdv", 0) or 0),
-                    "liq": float(p.get("liquidity", {}).get("usd", 0) or 0),
-                    "vol5": float(p.get("volume", {}).get("m5", 0) or 0),
-                })
+                    for p in pairs:
+                    # NEW FILTER: Only Raydium + pumpdotfun
+                    if p.get("dexId") not in ["raydium", "pumpdotfun"]:
+                        continue
+                    base = p.get("baseToken")
+                    if not base:
+                        continue
+                    symbol = base.get("symbol", "").lower()
+                    if "pump" not in symbol and "fun" not in symbol:
+                        continue
+
+                    mint = base["address"]
+                    if mint in seen:
+                        continue
+
+                    tokens.append({
+                        "mint": mint,
+                        "symbol": base["symbol"][:20],
+                        "fdv": float(p.get("fdv", 0) or 0),
+                        "liq": float(p.get("liquidity", {}).get("usd", 0) or 0),
+                        "vol5": float(p.get("volume", {}).get("m5", 0) or 0),
+                    })
 
                 log.info(f"Processing {len(tokens)} NEW tokens")
                 log.info(f"DEBUG: Seen cache size: {len(seen)} | Total pairs: {len(pairs)}")
