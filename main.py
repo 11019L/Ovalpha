@@ -308,7 +308,7 @@ async def premium_pump_scanner(app: Application):
 
                 log.info(f"Found {len(new_tokens)} NEW pump.fun tokens")
 
-                    for token in new_tokens:
+                for token in new_tokens:
                     mint = token.get("tokenAddress")
                     if not mint or mint in seen:
                         continue
@@ -317,9 +317,11 @@ async def premium_pump_scanner(app: Application):
 
                     # GET FULL DATA FROM PUMPPORTAL
                     async with sess.get(PUMPPORTAL_TOKEN.format(mint), timeout=10) as r:
-                        if r.status != 200: continue
+                        if r.status != 200:
+                            continue
                         data = await r.json()
-                        if not data.get("success"): continue
+                        if not data.get("success"):
+                            continue
 
                     sym = data.get("symbol", "UNKNOWN")[:20]
                     fdv = float(data.get("fdv", 0) or 0)
@@ -333,9 +335,7 @@ async def premium_pump_scanner(app: Application):
                     if not safe:
                         continue
 
-                    # ... rest of logic (whale, snipe, etc)
-
-                    # WHALE DETECTION
+                    # WHALE
                     whale = await detect_large_buy(mint, sess)
                     if whale >= MIN_WHALE_USD:
                         extra = f"**\\${whale:,.0f} WHALE BUY**\\n"
@@ -344,12 +344,12 @@ async def premium_pump_scanner(app: Application):
                         await broadcast(msg, InlineKeyboardMarkup(kb))
                         continue
 
-                    # VOLUME SPIKE
+                    # SPIKE
                     hist = volume_hist[mint]
                     hist.append(vol)
                     spike = len(hist) > 1 and vol >= (sum(hist[:-1]) / len(hist[:-1])) * 2.2
 
-                    # LEVEL LOGIC
+                    # LEVEL
                     level = None
                     if fdv >= MIN_FDVS_SNIPE and vol <= MAX_VOL_SNIPE:
                         level = "snipe"
@@ -372,7 +372,6 @@ async def premium_pump_scanner(app: Application):
             except Exception as e:
                 log.exception(f"Scanner crashed: {e}")
                 await asyncio.sleep(20)
-
 # --------------------------------------------------------------------------- #
 #                               REFERRAL & PAY
 # --------------------------------------------------------------------------- #
