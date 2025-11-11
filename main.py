@@ -695,11 +695,14 @@ async def main():
 
     await app.initialize()
     await app.start()
+
+    # START SCANNER & AUTO-SAVE
     asyncio.create_task(premium_pump_scanner(app))
     asyncio.create_task(auto_save())
 
     log.info("ONION BOT LIVE @alwaysgamble | NIGERIA READY")
     await app.updater.start_polling()
+    await asyncio.Event().wait()
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
