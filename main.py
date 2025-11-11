@@ -265,18 +265,17 @@ async def premium_pump_scanner(app: Application):
                 await asyncio.sleep(random.uniform(10, 20))  # 10-20s scans
                 tokens = []
 
-                # MORALIS PUMP.FUN NEW TOKENS ENDPOINT
-                MORALIS_API = "https://deep-index.moralis.io/api/v2.2/erc20/{chain}/new?limit=50"
-                chain = "solana"
-                headers = {"x-api-key": os.getenv("MORALIS_API_KEY")}
-                if not headers["x-api-key"]:
+                # CORRECT MORALIS PUMP.FUN ENDPOINT
+                MORALIS_URL = "https://solana-gateway.moralis.io/token/mainnet/exchange/pumpfun/new"
+                headers = {"accept": "application/json", "X-API-Key": os.getenv("MORALIS_API_KEY")}
+                if not headers["X-API-Key"]:
                     log.error("MORALIS_API_KEY missing in .env — get free key from moralis.com")
                     await asyncio.sleep(60)
                     continue
 
                 log.info("Fetching NEW pump.fun tokens from Moralis API...")
                 async with sess.get(
-                    MORALIS_API.format(chain=chain),
+                    f"{MORALIS_URL}?limit=50",
                     headers=headers,
                     timeout=15
                 ) as r:
@@ -291,41 +290,16 @@ async def premium_pump_scanner(app: Application):
                 log.info(f"Found {len(new_tokens)} NEW pump.fun tokens")
 
                 for token in new_tokens:
-                    mint = token.get("token_address")
+                    mint = token.get("tokenAddress")
                     if not mint or mint in seen:
                         continue
 
-                    # Get price data from Moralis
-                    price_url = f"https://solana-gateway.moralis.io/token/mainnet/{mint}/price"
-                    async with sess.get(price_url, headers=headers, timeout=10) as r2:
-                        if r2.status == 200:
-                            price_data = await r2.json()
-                            liq = price_data.get("liquidity", 0)
-                            fdv = price_data.get("market_cap", 0)
-                            vol = price_data.get("volume_24h", 0)
-                        else:
-                            liq, fdv, vol = 0, 0, 0
-
-                    tokens.append({
-                        "mint": mint,
-                        "symbol": token.get("symbol", "UNKNOWN")[:20],
-                        "fdv": float(fdv),
-                        "liq": float(liq),
-                        "vol5": float(vol) / 4.8,  # Approximate 5m from 24h
-                    })
-
-                log.info(f"Processing {len(tokens)} NEW tokens")
-                log.info(f"DEBUG: Seen cache size: {len(seen)}")
-
-                processed = 0
-                for t in tokens:
-                    mint = t["mint"]
                     seen[mint] = time.time()
 
-                    sym = t["symbol"]
-                    fdv = t["fdv"]
-                    liq = t["liq"]
-                    vol = t["vol5"]
+                    sym = token.get("symbol", "UNKNOWN")[:20]
+                    fdv = token.get("fullyDilutedValuation", 0)
+                    liq = token.get("liquidity", 0)
+                    vol = token.get("volume24h", 0) / 4.8  # Approximate 5m from 24h
 
                     log.info(f"CHECK {sym} | FDV ${fdv:,.0f} | Vol ${vol:,.0f} | Liq ${liq:,.0f}")
 
@@ -340,7 +314,6 @@ async def premium_pump_scanner(app: Application):
                         msg = format_alert(sym, mint, liq, fdv, vol, "whale", extra)
                         kb = [[InlineKeyboardButton("BUY NOW", callback_data=f"askbuy_{mint}")]]
                         await broadcast(msg, InlineKeyboardMarkup(kb))
-                        processed += 1
                         continue
 
                     hist = volume_hist[mint]
@@ -363,9 +336,8 @@ async def premium_pump_scanner(app: Application):
                             kb = [[InlineKeyboardButton("BUY NOW", callback_data=f"askbuy_{mint}")]] if level == "snipe" else None
                             msg = format_alert(sym, mint, liq, fdv, vol, level)
                             await broadcast(msg, InlineKeyboardMarkup(kb) if kb else None)
-                            processed += 1
 
-                log.info(f"Scanner: {processed} alerts sent")
+                log.info(f"Scanner: {len(tokens)} tokens processed")
 
             except Exception as e:
                 log.exception(f"Scanner crashed: {e}")
