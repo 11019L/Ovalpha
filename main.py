@@ -8,6 +8,7 @@ import random
 from collections import defaultdict, deque
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import quote
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -43,17 +44,20 @@ WALLET_BSC = os.getenv("WALLET_BSC", "0xYourWallet")
 FEE_WALLET = os.getenv("FEE_WALLET")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 PRICE_PREMIUM = 29.99
-REFERRAL_COMMISSION = 0.20  # 20%
+REFERRAL_COMMISSION = 0.20                     # 20%
 ETHERSCAN_KEY = os.getenv("ETHERSCAN_KEY", "")
+MORALIS_API_KEY = os.getenv("MORALIS_API_KEY")
+if not MORALIS_API_KEY:
+    raise ValueError("MORALIS_API_KEY required – get a free key at moralis.io")
 
 DATA_FILE = Path("data.json")
 SAVE_INTERVAL = 30
 SOLANA_RPC = os.getenv("SOLANA_RPC", "https://api.mainnet-beta.solana.com")
 DEXSCREENER_TOKEN = "https://api.dexscreener.com/latest/dex/tokens"
 MORALIS_URL = "https://solana-gateway.moralis.io/token/mainnet/exchange/pumpfun/new"
-PUMPPORTAL_TOKEN = "https://pumpportal.fun/api/data/token-info?address={}"
 PUMPFUN_PAIR = "https://frontend-api.pump.fun/pairs/{}"
-
+JUP_QUOTE = "https://quote-api.jup.ag/v6/quote"
+JUP_SWAP  = "https://quote-api.jup.ag/v6/swap"
 
 # Thresholds
 MIN_LIQUIDITY = 75
@@ -101,15 +105,12 @@ def load_data():
     return {"users": {}, "token_state": {}, "revenue": 0.0}
 
 data = load_data()
-users = data.get("users", {})
-token_state = data.get("token_state", {})
-
-# seen is IN-MEMORY ONLY — NEVER SAVED OR LOADED
-seen = {}
-log.info("SEEN CACHE: IN-MEMORY ONLY — NO FILE, NO LOAD")
-seen.clear()
-log.info("SEEN CACHE: FORCE CLEARED ON START")
+users = data.setdefault("users", {})
+token_state = data.setdefault("token_state", {})
 data["revenue"] = data.get("revenue", 0.0)
+
+# in-memory only
+seen: dict[str, float] = {}                     # mint → timestamp
 save_lock = asyncio.Lock()
 
 def save_data(data):
@@ -170,25 +171,31 @@ def get_referral_link(uid: int) -> str:
 # --------------------------------------------------------------------------- #
 async def is_rug_proof(mint: str, pair_addr: str, sess) -> tuple[bool, str]:
     try:
-        payload = {"jsonrpc": "2.0", "id": 1, "method": "getAccountInfo", "params": [mint, {"encoding": "jsonParsed"}]}
+        # 1. Mint authority frozen?
+        payload = {"jsonrpc": "2.0", "id": 1, "method": "getAccountInfo",
+                   "params": [mint, {"encoding": "jsonParsed"}]}
         async with sess.post(SOLANA_RPC, json=payload, timeout=8) as r:
             if r.status != 200: return False, "RPC error"
             info = (await r.json()).get("result", {}).get("value", {}).get("data", {}).get("parsed", {}).get("info", {})
             if info.get("mintAuthority"): return False, "Mint not frozen"
 
-        payload = {"jsonrpc": "2.0", "id": 1, "method": "getTokenLargestAccounts", "params": [pair_addr]}
+        # 2. LP burned?
+        payload = {"jsonrpc": "2.0", "id": 1, "method": "getTokenLargestAccounts",
+                   "params": [pair_addr]}
         async with sess.post(SOLANA_RPC, json=payload, timeout=8) as r:
             if r.status != 200: return False, "RPC error"
             top = (await r.json()).get("result", {}).get("value", [{}])[0]
             if top.get("address") != "dead111111111111111111111111111111111111111":
                 return False, "LP not burned"
 
+        # 3. Supply sanity
         payload = {"jsonrpc": "2.0", "id": 1, "method": "getTokenSupply", "params": [mint]}
         async with sess.post(SOLANA_RPC, json=payload, timeout=8) as r:
             if r.status != 200: return False, "RPC error"
             total = float((await r.json()).get("result", {}).get("value", {}).get("uiAmount", 0) or 0)
             if total == 0: return False, "No supply"
 
+        # 4. Dev hold <10%
         payload = {"jsonrpc": "2.0", "id": 1, "method": "getTokenLargestAccounts", "params": [mint]}
         async with sess.post(SOLANA_RPC, json=payload, timeout=8) as r:
             if r.status != 200: return False, "RPC error"
@@ -215,14 +222,18 @@ async def detect_large_buy(mint: str, sess) -> float:
             if price <= 0: return 0
             pair_addr = pair["pairAddress"]
 
-        payload = {"jsonrpc": "2.0", "id": 1, "method": "getSignaturesForAddress", "params": [pair_addr, {"limit": 5}]}
+        payload = {"jsonrpc": "2.0", "id": 1,
+                   "method": "getSignaturesForAddress",
+                   "params": [pair_addr, {"limit": 5}]}
         async with sess.post(SOLANA_RPC, json=payload, timeout=15) as r:
             sigs = (await r.json()).get("result", [])
             if not sigs: return 0
 
         largest = 0.0
         for sig in sigs:
-            tx_payload = {"jsonrpc": "2.0", "id": 1, "method": "getTransaction", "params": [sig["signature"], {"encoding": "jsonParsed"}]}
+            tx_payload = {"jsonrpc": "2.0", "id": 1,
+                          "method": "getTransaction",
+                          "params": [sig["signature"], {"encoding": "jsonParsed"}]}
             async with sess.post(SOLANA_RPC, json=tx_payload, timeout=15) as tx_r:
                 tx_data = await tx_r.json()
                 result = tx_data.get("result")
@@ -242,48 +253,78 @@ async def detect_large_buy(mint: str, sess) -> float:
     except: return 0
 
 # --------------------------------------------------------------------------- #
+#                               PAIR FETCH + RETRY
+# --------------------------------------------------------------------------- #
+async def get_pair_address(mint: str, sess) -> str | None:
+    max_retries = 3
+    for attempt in range(max_retries):
+        await asyncio.sleep(2 ** attempt * 3)               # 3s, 6s, 12s
+        async with sess.get(PUMPFUN_PAIR.format(mint), timeout=10,
+                            headers={"User-Agent": "OnionBot/1.0"}) as r:
+            if r.status != 200:
+                log.debug(f"  → Pair API attempt {attempt+1}/{max_retries} status {r.status} for {mint[:8]}")
+                continue
+            data = await r.json()
+            pair_addr = data.get("pairAddress")
+            if pair_addr:
+                return pair_addr
+    # Fallback → Dexscreener
+    async with sess.get(f"{DEXSCREENER_TOKEN}/{mint}", timeout=10) as r:
+        if r.status == 200:
+            ds = await r.json()
+            pair = next((p for p in ds.get("pairs", []) if p.get("dexId") == "pumpswap"), None)
+            if pair:
+                log.info(f"  → FALLBACK pair from Dexscreener {mint[:8]}")
+                return pair["pairAddress"]
+    return None
+
+# --------------------------------------------------------------------------- #
 #                               SCANNER
 # --------------------------------------------------------------------------- #
 async def premium_pump_scanner(app: Application):
     volume_hist = defaultdict(lambda: deque(maxlen=4))
+    skip_counter = defaultdict(int)
+
     async with aiohttp.ClientSession() as sess:
         while True:
             try:
-                await asyncio.sleep(random.uniform(10, 20))  # 10-20s between scans
-                headers = {"accept": "application/json", "X-API-Key": os.getenv("MORALIS_API_KEY")}
-                if not headers["X-API-Key"]:
-                    log.error("MORALIS_API_KEY missing in .env — get free key from moralis.com")
-                    await asyncio.sleep(60)
-                    continue
-
-                log.info("Fetching NEW pump.fun tokens from Moralis API...")
+                await asyncio.sleep(random.uniform(12, 22))
+                headers = {"accept": "application/json", "X-API-Key": MORALIS_API_KEY}
                 async with sess.get(f"{MORALIS_URL}?limit=50", headers=headers, timeout=15) as r:
                     if r.status != 200:
-                        log.error(f"Moralis API error: {r.status}")
+                        log.error(f"Moralis error {r.status}")
                         await asyncio.sleep(30)
                         continue
                     new_tokens = (await r.json()).get("result", [])[:50]
 
-                log.info(f"Found {len(new_tokens)} NEW pump.fun tokens")
-                await asyncio.sleep(15)  # CRITICAL: Wait for pairAddress to appear
+                log.info(f"Fetched {len(new_tokens)} new pump.fun tokens")
+                await asyncio.sleep(18)                     # give pair time
+
+                # clean old seen entries (1h)
+                old = [m for m, t in seen.items() if time.time() - t > 3600]
+                for m in old: del seen[m]
 
                 for token in new_tokens:
                     mint = token.get("tokenAddress")
                     if not mint or mint in seen:
                         continue
 
-                    seen[mint] = time.time()
+                    # optional age filter
+                    created_at = token.get("createdAt")
+                    if created_at:
+                        try:
+                            age = time.time() - datetime.fromisoformat(created_at.replace('Z', '+00:00')).timestamp()
+                            if age < 20:
+                                skip_counter["too_new"] += 1
+                                continue
+                        except:
+                            pass
 
-                    # GET pairAddress FROM pump.fun
-                    async with sess.get(PUMPFUN_PAIR.format(mint), timeout=10) as r:
-                        if r.status != 200:
-                            log.info(f"  → SKIP: No pair API for {mint[:8]}")
-                            continue
-                        pair_data = await r.json()
-                        pair_addr = pair_data.get("pairAddress")
-                        if not pair_addr:
-                            log.info(f"  → SKIP: No pairAddress in API for {mint[:8]}")
-                            continue
+                    seen[mint] = time.time()
+                    pair_addr = await get_pair_address(mint, sess)
+                    if not pair_addr:
+                        skip_counter["no_pair"] += 1
+                        continue
 
                     sym = token.get("symbol", "UNKNOWN")[:20]
                     fdv = float(token.get("fullyDilutedValuation", 0) or 0)
@@ -295,10 +336,10 @@ async def premium_pump_scanner(app: Application):
                     safe, reason = await is_rug_proof(mint, pair_addr, sess)
                     log.info(f"  → RUG: {'PASS' if safe else 'FAIL'} | {reason}")
                     if not safe:
+                        skip_counter["rug"] += 1
                         continue
 
-                    # ... rest of your logic (whale, snipe, etc)
-
+                    # ----- WHALE -----
                     whale = await detect_large_buy(mint, sess)
                     if whale >= MIN_WHALE_USD:
                         extra = f"**\\${whale:,.0f} WHALE BUY**\\n"
@@ -307,16 +348,19 @@ async def premium_pump_scanner(app: Application):
                         await broadcast(msg, InlineKeyboardMarkup(kb))
                         continue
 
+                    # ----- VOLUME HISTORY & SPIKE -----
                     hist = volume_hist[mint]
                     hist.append(vol)
-                    spike = len(hist) > 1 and vol >= (sum(hist[:-1]) / len(hist[:-1])) * 2.2
-
                     level = None
+
+                    # snipe
                     if fdv >= MIN_FDVS_SNIPE and vol <= MAX_VOL_SNIPE:
                         level = "snipe"
+                    # confirm
                     elif fdv >= MIN_FDVS_CONFIRM and vol >= MIN_VOL_CONFIRM:
                         level = "confirm"
-                    elif spike and vol >= MIN_VOL_PUMP:
+                    # pump (spike vs previous scan)
+                    elif len(hist) >= 2 and vol >= hist[-2] * 3.0 and vol >= MIN_VOL_PUMP:
                         level = "pump"
 
                     if level:
@@ -328,7 +372,8 @@ async def premium_pump_scanner(app: Application):
                             msg = format_alert(sym, mint, liq, fdv, vol, level)
                             await broadcast(msg, InlineKeyboardMarkup(kb) if kb else None)
 
-                log.info(f"Scanner: {len([t for t in new_tokens if t.get('tokenAddress') in seen and token.get('pairAddress')])} tokens processed")
+                log.info(f"Scanner round | Skips: {dict(skip_counter)} | Seen: {len(seen)}")
+                skip_counter.clear()
 
             except Exception as e:
                 log.exception(f"Scanner crashed: {e}")
@@ -372,9 +417,8 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     users[uid]["chat_id"] = chat_id
     users[uid]["username"] = username
 
-    ref_code = ctx.args[0] if ctx.args else None
-    if ref_code:
-        attribute_referral(uid, ref_code)
+    if ctx.args:
+        attribute_referral(uid, ctx.args[0])
 
     await update.message.reply_text(
         "<b>ONION PREMIUM</b>\n\n"
@@ -388,44 +432,68 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def refer(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    if uid not in users: return await update.message.reply_text("Use /start first.")
+    if uid not in users:
+        await update.message.reply_text("Use /start first.")
+        return
     link = get_referral_link(uid)
     stats = users[uid]["referral_stats"]
     earned = users[uid]["commissions_earned"]
     msg = f"*YOUR LINK*\\n[Share]({link})\\n\\n*STATS*\\nJoins: {stats['joins']}\\nPaid: {stats['paid_subs']}\\nEarned: \\${earned:.2f}"
     await update.message.reply_text(md(msg), parse_mode="MarkdownV2", disable_web_page_preview=True)
 
+# ---- PAYMENT VERIFICATION (BSC USDT) ----
+USDT_CONTRACT = "0x55d398326f99059fF775485246999027B3197955"
+
 async def pay(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not ctx.args: return await update.message.reply_text("Usage: /pay TXID")
+    if not ctx.args:
+        await update.message.reply_text("Usage: /pay TXID")
+        return
     txid = ctx.args[0]
     uid = update.effective_user.id
-    contract = "0x55d398326f99059fF775485246999027B3197955"
-    url = f"https://api.bscscan.com/api?module=account&action=tokentx&contractaddress={contract}&address={WALLET_BSC}&txhash={txid}&apikey={ETHERSCAN_KEY}"
+
+    url = (
+        f"https://api.bscscan.com/api?module=account&action=tokentx"
+        f"&contractaddress={USDT_CONTRACT}&address={WALLET_BSC}"
+        f"&startblock=0&endblock=99999999&sort=desc&apikey={ETHERSCAN_KEY}"
+    )
     try:
-        resp = requests.get(url).json()
-        tx = resp.get("result", [{}])[0]
-        value = float(tx.get("value", 0)) / 1e18
-        if tx.get("tokenSymbol") == "USDT" and value >= PRICE_PREMIUM:
-            was_paid = users[uid].get("paid", False)
-            users[uid]["paid"] = True
-            users[uid]["paid_until"] = (datetime.utcnow() + timedelta(days=30)).isoformat()
-            users[uid]["free_alerts"] = 0
-            if not was_paid:
-                track_commission(uid)
-            await update.message.reply_text(md("*PREMIUM ON*"), parse_mode="MarkdownV2")
-        else:
-            await update.message.reply_text("Invalid TX.")
-    except:
+        resp = requests.get(url, timeout=12).json()
+        if resp.get("status") != "1":
+            await update.message.reply_text("BscScan error.")
+            return
+
+        for tx in resp.get("result", []):
+            if tx.get("hash").lower() != txid.lower():
+                continue
+            value = float(tx.get("value", 0)) / 1e18
+            if tx.get("tokenSymbol") == "USDT" and value >= PRICE_PREMIUM:
+                was_paid = users[uid].get("paid", False)
+                users[uid]["paid"] = True
+                users[uid]["paid_until"] = (datetime.utcnow() + timedelta(days=30)).isoformat()
+                users[uid]["free_alerts"] = 0
+                if not was_paid:
+                    track_commission(uid)
+                await update.message.reply_text(md("*PREMIUM ACTIVATED*"), parse_mode="MarkdownV2")
+                return
+        await update.message.reply_text("Invalid TX / amount.")
+    except Exception as e:
+        log.error(f"Pay verify error: {e}")
         await update.message.reply_text("Check failed.")
 
 async def wallet(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    if not users[uid].get("paid"): return await update.message.reply_text("Premium only.")
-    if not ctx.args: return await update.message.reply_text("Usage: /wallet <addr>")
+    if not users[uid].get("paid"):
+        await update.message.reply_text("Premium only.")
+        return
+    if not ctx.args:
+        await update.message.reply_text("Usage: /wallet <sol_address>")
+        return
     addr = ctx.args[0].strip()
-    if len(addr) < 32: return await update.message.reply_text("Invalid.")
+    if len(addr) < 32:
+        await update.message.reply_text("Invalid address.")
+        return
     users[uid]["wallet"] = addr
-    await update.message.reply_text(md(f"Wallet: `{addr[:8]}...{addr[-6:]}`"), parse_mode="MarkdownV2")
+    await update.message.reply_text(md(f"Wallet set: `{addr[:8]}...{addr[-6:]}`"), parse_mode="MarkdownV2")
 
 async def stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -444,7 +512,7 @@ async def cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(md("Cancelled."))
 
 # --------------------------------------------------------------------------- #
-#                               AUTO-BUY & BROADCAST
+#                               AUTO-BUY (Jupiter → Phantom deep-link)
 # --------------------------------------------------------------------------- #
 async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -453,47 +521,89 @@ async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     mint = query.data.split("_", 1)[1]
     uid = query.from_user.id
     if not users[uid].get("paid") or not users[uid].get("wallet"):
-        return await query.edit_message_text(md("Use /wallet <addr>"))
+        await query.edit_message_text(md("Set wallet first: /wallet <addr>"))
+        return
     users[uid]["pending_buy"] = {"mint": mint, "time": time.time()}
-    await query.edit_message_text(md(f"Enter \\$USD (e.g. 50):\\n`{mint[:8]}...`\\n/cancel"))
+    await query.edit_message_text(md(f"Enter \\$USD amount (e.g. 50):\\n`{mint[:8]}...`\\n/cancel"))
 
 async def handle_amount(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    if "pending_buy" not in users[uid]: return
-    pending = users[uid]["pending_buy"]
-    if time.time() - pending["time"] > 60: del users[uid]["pending_buy"]; return
+    pending = users[uid].get("pending_buy")
+    if not pending or time.time() - pending["time"] > 60:
+        if pending: del users[uid]["pending_buy"]
+        return
     try:
         usd = float(update.message.text.strip())
         if usd < 1: raise ValueError
-    except: return await update.message.reply_text(md("Enter number"))
+    except:
+        await update.message.reply_text(md("Enter a valid number"))
+        return
+
     mint = pending["mint"]
     del users[uid]["pending_buy"]
+
     async with aiohttp.ClientSession() as sess:
+        # SOL price
         async with sess.get("https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd") as r:
             sol_price = (await r.json())["solana"]["usd"]
-        sol = usd / sol_price
-        params = {"inputMint": "So11111111111111111111111111111111111111112", "outputMint": mint, "amount": int(sol * 1e9), "slippageBps": 100, "feeBps": 100}
-        async with sess.get("https://quote-api.jup.ag/v6/quote", params=params) as r:
-            quote = await r.json()
-        payload = {"quoteResponse": quote, "userPublicKey": users[uid]["wallet"], "wrapAndUnwrapSol": True, "feeAccount": FEE_WALLET}
-        async with sess.post("https://quote-api.jup.ag/v6/quote", json=payload) as r:
-            swap = await r.json()
-            tx = swap.get("swapTransaction")
-            if tx:
-                await update.message.reply_text(md(f"BOUGHT \\${usd}\\!\\n[Tx](https://solscan.io/tx/{tx})"), parse_mode="MarkdownV2", disable_web_page_preview=True)
-            else:
-                await update.message.reply_text(md("Swap failed."))
+        sol_amount = usd / sol_price
 
+        # Quote
+        params = {
+            "inputMint": "So11111111111111111111111111111111111111112",
+            "outputMint": mint,
+            "amount": int(sol_amount * 1e9),
+            "slippageBps": 100,
+            "feeBps": 100
+        }
+        async with sess.get(JUP_QUOTE, params=params, timeout=12) as r:
+            quote = await r.json()
+
+        # Swap transaction
+        payload = {
+            "quoteResponse": quote,
+            "userPublicKey": users[uid]["wallet"],
+            "wrapAndUnwrapSol": True,
+            "feeAccount": FEE_WALLET,
+            "prioritizationFeeLamports": "auto"
+        }
+        async with sess.post(JUP_SWAP, json=payload, timeout=12) as r:
+            swap_resp = await r.json()
+
+        tx_b64 = swap_resp.get("swapTransaction")
+        if not tx_b64:
+            await update.message.reply_text(md("Swap failed – try again later."))
+            return
+
+        deep_link = f"https://phantom.app/ul/v1/signAndSendTransaction?tx={quote(tx_b64)}&cluster=mainnet-beta"
+        await update.message.reply_text(
+            md(f"*BUY \\${usd}*\\n"
+               f"CA: `{mint[:8]}...{mint[-6:]}`\\n"
+               f"[Confirm in Phantom]({deep_link})"),
+            parse_mode="MarkdownV2",
+            disable_web_page_preview=True
+        )
+
+# --------------------------------------------------------------------------- #
+#                               BROADCAST (free-alert enforcement)
+# --------------------------------------------------------------------------- #
 async def broadcast(msg, reply_markup=None):
     async with save_lock:
         for uid, u in list(users.items()):
-            if u.get("chat_id") and (u.get("paid") or u.get("free_alerts", 0) > 0):
-                await safe_send(app, u["chat_id"], msg, reply_markup)
-                if not u.get("paid") and u.get("free_alerts", 0) > 0:
-                    u["free_alerts"] -= 1
+            chat_id = u.get("chat_id")
+            if not chat_id: continue
+
+            paid = u.get("paid", False)
+            free_left = u.get("free_alerts", 0)
+
+            if paid or free_left > 0:
+                await safe_send(app, chat_id, msg, reply_markup)
+                if not paid:
+                    u["free_alerts"] = free_left - 1
+            # else: silently skip
 
 # --------------------------------------------------------------------------- #
-#                               MAIN
+#                               AUTO-SAVE
 # --------------------------------------------------------------------------- #
 async def auto_save():
     while True:
@@ -501,6 +611,9 @@ async def auto_save():
         async with save_lock:
             save_data(data)
 
+# --------------------------------------------------------------------------- #
+#                               MAIN
+# --------------------------------------------------------------------------- #
 async def main():
     global app
     app = Application.builder().token(BOT_TOKEN).build()
