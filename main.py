@@ -435,8 +435,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "3 free SNIPE alerts\n"
         f"Premium: <code>${PRICE_PREMIUM}/mo</code>\n"
         f"Pay: <code>{WALLET_BSC}</code>\n"
-        "<code>/pay TXID</code> | <code>/wallet YOUR_SOL</code>\n"
-        "<code>/refer</code> — Earn 20%",
+        "<code>/pay TXID</code> | <code>/wallet YOUR_SOL</code>\n",
         parse_mode="HTML"
     )
 
