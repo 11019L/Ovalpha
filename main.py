@@ -11,7 +11,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 load_dotenv()
-
+log.info(f"HELLO @alwaysgamble — USING RPC: {SOLANA_RPC}")
 import aiohttp
 import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
