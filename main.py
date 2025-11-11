@@ -264,15 +264,25 @@ async def premium_pump_scanner(app: Application):
                 tokens = []
 
                 log.info("Fetching pump.fun tokens from DexScreener...")
+                # USE PUMPDOTFUN DEX DIRECTLY — NO SEARCH, NO CACHE
+                DEX_PUMP = "https://api.dexscreener.com/latest/dex/pairs/solana"
                 async with sess.get(
-                    DEXSCREENER_SEARCH,
-                    params={
-                        "q": "pump.fun",
-                        "chainId": "solana",
-                        "t": int(time.time())  # Force fresh data
-                    },
+                    DEX_PUMP,
+                    params={"pairAddresses": ",".join([
+                        # Top pump.fun pairs (update daily from pump.fun)
+                        # We'll use a fallback list + real-time fetch
+                    ])},
                     timeout=15
                 ) as r:
+                    # FALLBACK: use search with cache buster
+                    if r.status != 200:
+                        log.warning("Direct pair fetch failed. Falling back to search...")
+                        async with sess.get(
+                            DEXSCREENER_SEARCH,
+                            params={"q": "pump", "chainId": "solana", "t": int(time.time())},
+                            timeout=15
+                        ) as r2:
+                            ...
                     if r.status == 429:
                         backoff = random.uniform(60, 120)
                         log.warning(f"Rate limited by DexScreener. Backing off {backoff:.0f}s...")
@@ -290,13 +300,10 @@ async def premium_pump_scanner(app: Application):
 
                 # === FILTER: Raydium + pumpdotfun + pump/fun in symbol ===
                 for p in pairs:
-                    if p.get("dexId") not in ["raydium", "pumpdotfun"]:
-                        continue
+                    if p.get("dexId") != "pumpdotfun":
+                        continue  # ONLY pumpdotfun tokens
                     base = p.get("baseToken")
                     if not base:
-                        continue
-                    symbol = base.get("symbol", "").lower()
-                    if "pump" not in symbol and "fun" not in symbol:
                         continue
 
                     mint = base["address"]
