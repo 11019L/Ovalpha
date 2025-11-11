@@ -34,7 +34,12 @@ from telegram.ext import (
     filters,
 )
 from telegram.helpers import escape_markdown
-
+# --------------------------------------------------------------------------- #
+#                               GLOBAL STATE
+# --------------------------------------------------------------------------- #
+seen = {}                    # mint → timestamp (first seen)
+token_state = {}             # mint → {"sent": set()}  # prevent duplicate alerts
+ready_queue = []             # ← ADD THIS LINE (tokens waiting 60s)
 # --------------------------------------------------------------------------- #
 #                               LOGGING & CONFIG
 # --------------------------------------------------------------------------- #
@@ -333,6 +338,9 @@ async def get_pair_from_rpc(mint: str, sess) -> str | None:
 # --------------------------------------------------------------------------- #
 #                               SCANNER
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+#                               SCANNER
+# --------------------------------------------------------------------------- #
 async def premium_pump_scanner(app: Application):
     volume_hist = defaultdict(lambda: deque(maxlen=4))
     skip_counter = defaultdict(int)
@@ -379,7 +387,7 @@ async def premium_pump_scanner(app: Application):
                 old = [m for m, t in seen.items() if now - t > 3600]
                 for m in old: del seen[m]
 
-                # === PROCESS NEW PAIRS ===
+                # === PROCESS NEW PAIRS (ADD TO QUEUE) ===
                 for pair in pairs:
                     try:
                         base_token = pair.get("baseToken") or {}
@@ -387,77 +395,89 @@ async def premium_pump_scanner(app: Application):
                         if not mint:
                             continue
 
-                        # === 60s+ SINCE FIRST SEEN (BYPASS BROKEN pairAge) ===
-                        if mint in seen:
-                            if time.time() - seen[mint] < 60:
-                                skip_counter["too_new"] += 1
-                                log.debug(f"  → SKIP: {mint[:8]} only {time.time() - seen[mint]:.0f}s since first seen")
-                                continue
-                        else:
+                        # === FIRST TIME SEEN → ADD TO QUEUE ===
+                        if mint not in seen:
                             seen[mint] = time.time()
-                            skip_counter["too_new"] += 1
-                            log.debug(f"  → SKIP: {mint[:8]} first seen, waiting 60s")
+                            ready_queue.append(mint)
+                            log.debug(f"  → ADDED TO QUEUE: {mint[:8]} (will process in 60s)")
                             continue
-
-                        # === NOW 60s+ OLD → PROCESS ===
-                        sym = base_token.get("symbol", "UNKNOWN")[:20]
-                        fdv = float(pair.get("fdv", 0) or 0)
-                        liq = float(pair.get("liquidity", {}).get("usd", 0) or 0)
-                        vol_5m = float(pair.get("volume", {}).get("m5", 0) or 0)
-
-                        if fdv == 0 or liq == 0:
-                            skip_counter["bad_data"] += 1
-                            continue
-
-                        log.info(f"CHECK {sym} | FDV ${fdv:,.0f} | Vol ${vol_5m:,.0f} | Liq ${liq:,.0f}")
-
-                        pair_addr = pair.get("pairAddress")
-                        if not pair_addr:
-                            skip_counter["no_pair"] += 1
-                            continue
-
-                        # === RUG CHECK ===
-                        safe, reason = await is_rug_proof(mint, pair_addr, sess)
-                        log.info(f"  → RUG: {'PASS' if safe else 'FAIL'} | {reason}")
-                        if not safe:
-                            skip_counter["rug"] += 1
-                            continue
-
-                        # === WHALE ===
-                        whale = await detect_large_buy(mint, sess)
-                        if whale >= MIN_WHALE_USD:
-                            extra = f"**\\${whale:,.0f} WHALE BUY**\\n"
-                            msg = format_alert(sym, mint, liq, fdv, vol_5m, "whale", extra)
-                            kb = [[InlineKeyboardButton("BUY NOW", callback_data=f"askbuy_{mint}")]]
-                            await broadcast(msg, InlineKeyboardMarkup(kb))
-                            continue
-
-                        # === SNIPE LOGIC ===
-                        hist = volume_hist[mint]
-                        hist.append(vol_5m)
-                        level = None
-
-                        if fdv >= MIN_FDVS_SNIPE and vol_5m <= MAX_VOL_SNIPE:
-                            level = "snipe"
-                        elif fdv >= MIN_FDVS_CONFIRM and vol_5m >= MIN_VOL_CONFIRM:
-                            level = "confirm"
-                        elif len(hist) >= 2 and vol_5m >= hist[-2] * 3.0 and vol_5m >= MIN_VOL_PUMP:
-                            level = "pump"
-
-                        if level:
-                            state = token_state.setdefault(mint, {"sent": set()})
-                            if level not in state["sent"]:
-                                state["sent"].add(level)
-                                token_state[mint] = state
-                                kb = [[InlineKeyboardButton("BUY NOW", callback_data=f"askbuy_{mint}")]] if level == "snipe" else None
-                                msg = format_alert(sym, mint, liq, fdv, vol_5m, level)
-                                await broadcast(msg, InlineKeyboardMarkup(kb) if kb else None)
 
                     except Exception as e:
-                        log.debug(f"Pair processing error: {e}")
+                        log.debug(f"Queue add error: {e}")
                         continue
 
-                log.info(f"Scanner round | Skips: {dict(skip_counter)} | Seen: {len(seen)}")
+                # === PROCESS READY QUEUE (60s+ OLD) ===
+                for mint in list(ready_queue):
+                    if time.time() - seen[mint] < 60:
+                        continue  # Still waiting
+
+                    log.info(f"  → 60s REACHED: {mint[:8]} → PROCESSING FROM QUEUE")
+                    ready_queue.remove(mint)
+
+                    # Fetch fresh data by mint
+                    async with sess.get(f"https://api.dexscreener.com/latest/dex/token/{mint}", timeout=10) as r:
+                        if r.status != 200:
+                            continue
+                        data = await r.json()
+                        pair = next((p for p in data.get("pairs", []) if p.get("dexId") == "pumpswap"), None)
+                        if not pair:
+                            continue
+
+                        try:
+                            sym = pair["baseToken"]["symbol"][:20]
+                            fdv = float(pair.get("fdv", 0) or 0)
+                            liq = float(pair.get("liquidity", {}).get("usd", 0) or 0)
+                            vol_5m = float(pair.get("volume", {}).get("m5", 0) or 0)
+                            pair_addr = pair.get("pairAddress")
+
+                            if fdv == 0 or liq == 0 or not pair_addr:
+                                skip_counter["bad_data"] += 1
+                                continue
+
+                            log.info(f"QUEUE PROCESS {sym} | FDV ${fdv:,.0f} | Vol ${vol_5m:,.0f} | Liq ${liq:,.0f}")
+
+                            # === RUG CHECK ===
+                            safe, reason = await is_rug_proof(mint, pair_addr, sess)
+                            log.info(f"  → RUG: {'PASS' if safe else 'FAIL'} | {reason}")
+                            if not safe:
+                                skip_counter["rug"] += 1
+                                continue
+
+                            # === WHALE ===
+                            whale = await detect_large_buy(mint, sess)
+                            if whale >= MIN_WHALE_USD:
+                                extra = f"**\\${whale:,.0f} WHALE BUY**\\n"
+                                msg = format_alert(sym, mint, liq, fdv, vol_5m, "whale", extra)
+                                kb = [[InlineKeyboardButton("BUY NOW", callback_data=f"askbuy_{mint}")]]
+                                await broadcast(msg, InlineKeyboardMarkup(kb))
+                                continue
+
+                            # === SNIPE LOGIC ===
+                            hist = volume_hist[mint]
+                            hist.append(vol_5m)
+                            level = None
+
+                            if fdv >= MIN_FDVS_SNIPE and vol_5m <= MAX_VOL_SNIPE:
+                                level = "snipe"
+                            elif fdv >= MIN_FDVS_CONFIRM and vol_5m >= MIN_VOL_CONFIRM:
+                                level = "confirm"
+                            elif len(hist) >= 2 and vol_5m >= hist[-2] * 3.0 and vol_5m >= MIN_VOL_PUMP:
+                                level = "pump"
+
+                            if level:
+                                state = token_state.setdefault(mint, {"sent": set()})
+                                if level not in state["sent"]:
+                                    state["sent"].add(level)
+                                    token_state[mint] = state
+                                    kb = [[InlineKeyboardButton("BUY NOW", callback_data=f"askbuy_{mint}")]] if level == "snipe" else None
+                                    msg = format_alert(sym, mint, liq, fdv, vol_5m, level)
+                                    await broadcast(msg, InlineKeyboardMarkup(kb) if kb else None)
+
+                        except Exception as e:
+                            log.debug(f"Queue process error {mint[:8]}: {e}")
+                            continue
+
+                log.info(f"Scanner round | Skips: {dict(skip_counter)} | Seen: {len(seen)} | Queue: {len(ready_queue)}")
                 skip_counter.clear()
 
             except Exception as e:
