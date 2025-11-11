@@ -183,16 +183,16 @@ async def is_rug_proof(mint: str, sess) -> tuple[bool, str]:
             if info.get("mintAuthority"):
                 return False, "Mint not frozen"
 
-        # 2. Get CORRECT pair address from Moralis
-        MORALIS_PAIR_URL = f"https://solana-gateway.moralis.io/token/mainnet/{mint}/pair"
-        headers = {"accept": "application/json", "X-API-Key": os.getenv("MORALIS_API_KEY")}
-        async with sess.get(MORALIS_PAIR_URL, headers=headers, timeout=8) as r:
+        # 2. Get pair address from DexScreener (only pump.fun)
+        async with sess.get(f"{DEXSCREENER_TOKEN}/{mint}", timeout=10) as r:
             if r.status != 200:
                 return False, "No pair"
-            pair_data = await r.json()
-            pair_addr = pair_data.get("pairAddress")
-            if not pair_addr:
-                return False, "No pair address"
+            data = await r.json()
+            pairs = data.get("pairs", [])
+            pair = next((p for p in pairs if p.get("dexId") == "pumpfun" or "pump.fun" in p.get("url", "")), None)
+            if not pair:
+                return False, "No pump.fun pair"
+            pair_addr = pair["pairAddress"]
 
         # 3. Check LP burn
         payload = {"jsonrpc": "2.0", "id": 1, "method": "getTokenLargestAccounts", "params": [pair_addr]}
