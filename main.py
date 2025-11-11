@@ -12,6 +12,15 @@ from urllib.parse import quote
 
 from dotenv import load_dotenv
 load_dotenv()
+from dotenv import load_dotenv
+load_dotenv()
+
+# ADD THIS:
+import os
+print("DEBUG .env:")
+print("BOT_TOKEN:", bool(os.getenv("BOT_TOKEN")))
+print("MORALIS_API_KEY:", os.getenv("MORALIS_API_KEY")[:10] + "..." if os.getenv("MORALIS_API_KEY") else None)
+print("SOLANA_RPC:", os.getenv("SOLANA_RPC"))
 
 import aiohttp
 import requests
