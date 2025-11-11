@@ -52,6 +52,7 @@ SOLANA_RPC = os.getenv("SOLANA_RPC", "https://api.mainnet-beta.solana.com")
 DEXSCREENER_TOKEN = "https://api.dexscreener.com/latest/dex/tokens"
 MORALIS_URL = "https://solana-gateway.moralis.io/token/mainnet/exchange/pumpfun/new"
 PUMPPORTAL_TOKEN = "https://pumpportal.fun/api/data/token-info?address={}"
+PUMPFUN_PAIR = "https://frontend-api.pump.fun/pairs/{}"
 
 # Thresholds
 MIN_LIQUIDITY = 75
@@ -166,46 +167,33 @@ def get_referral_link(uid: int) -> str:
 # --------------------------------------------------------------------------- #
 #                               RUG CHECK
 # --------------------------------------------------------------------------- #
-async def is_rug_proof(mint: str, sess) -> tuple[bool, str]:
+async def is_rug_proof(mint: str, pair_addr: str, sess) -> tuple[bool, str]:
     try:
-        async with sess.get(PUMPPORTAL_TOKEN.format(mint), timeout=10) as r:
-            if r.status != 200:
-                return False, "No token data"
-            data = await r.json()
-            if not data.get("success"):
-                return False, "Invalid token"
-            pair_addr = data.get("pair")
-            if not pair_addr:
-                return False, "No pair"
-
+        # MINT FROZEN?
         payload = {"jsonrpc": "2.0", "id": 1, "method": "getAccountInfo", "params": [mint, {"encoding": "jsonParsed"}]}
         async with sess.post(SOLANA_RPC, json=payload, timeout=8) as r:
-            if r.status != 200:
-                return False, "RPC error"
+            if r.status != 200: return False, "RPC error"
             info = (await r.json()).get("result", {}).get("value", {}).get("data", {}).get("parsed", {}).get("info", {})
-            if info.get("mintAuthority"):
-                return False, "Mint not frozen"
+            if info.get("mintAuthority"): return False, "Mint not frozen"
 
+        # LP BURNED?
         payload = {"jsonrpc": "2.0", "id": 1, "method": "getTokenLargestAccounts", "params": [pair_addr]}
         async with sess.post(SOLANA_RPC, json=payload, timeout=8) as r:
-            if r.status != 200:
-                return False, "RPC error"
+            if r.status != 200: return False, "RPC error"
             top = (await r.json()).get("result", {}).get("value", [{}])[0]
             if top.get("address") != "dead111111111111111111111111111111111111111":
                 return False, "LP not burned"
 
+        # DEV HOLDINGS < 10%
         payload = {"jsonrpc": "2.0", "id": 1, "method": "getTokenSupply", "params": [mint]}
         async with sess.post(SOLANA_RPC, json=payload, timeout=8) as r:
-            if r.status != 200:
-                return False, "RPC error"
+            if r.status != 200: return False, "RPC error"
             total = float((await r.json()).get("result", {}).get("value", {}).get("uiAmount", 0) or 0)
-            if total == 0:
-                return False, "No supply"
+            if total == 0: return False, "No supply"
 
         payload = {"jsonrpc": "2.0", "id": 1, "method": "getTokenLargestAccounts", "params": [mint]}
         async with sess.post(SOLANA_RPC, json=payload, timeout=8) as r:
-            if r.status != 200:
-                return False, "RPC error"
+            if r.status != 200: return False, "RPC error"
             held = float((await r.json()).get("result", {}).get("value", [{}])[0].get("uiAmount", 0) or 0)
             if total > 0 and (held / total) > 0.10:
                 return False, f"Dev holds {(held/total)*100:.1f}%"
@@ -263,10 +251,10 @@ async def premium_pump_scanner(app: Application):
     async with aiohttp.ClientSession() as sess:
         while True:
             try:
-                await asyncio.sleep(random.uniform(10, 20))
+                await asyncio.sleep(random.uniform(10, 20))  # 10-20s between scans
                 headers = {"accept": "application/json", "X-API-Key": os.getenv("MORALIS_API_KEY")}
                 if not headers["X-API-Key"]:
-                    log.error("MORALIS_API_KEY missing")
+                    log.error("MORALIS_API_KEY missing in .env — get free key from moralis.com")
                     await asyncio.sleep(60)
                     continue
 
@@ -279,6 +267,7 @@ async def premium_pump_scanner(app: Application):
                     new_tokens = (await r.json()).get("result", [])[:50]
 
                 log.info(f"Found {len(new_tokens)} NEW pump.fun tokens")
+                await asyncio.sleep(15)  # CRITICAL: Wait for pairAddress to appear
 
                 for token in new_tokens:
                     mint = token.get("tokenAddress")
@@ -287,23 +276,19 @@ async def premium_pump_scanner(app: Application):
 
                     seen[mint] = time.time()
 
-                    async with sess.get(PUMPPORTAL_TOKEN.format(mint), timeout=10) as r:
-                        if r.status != 200:
-                            log.info(f"  → SKIP: No data for {mint[:8]}")
-                            continue
-                        data = await r.json()
-                        if not data.get("success"):
-                            log.info(f"  → SKIP: Invalid data for {mint[:8]}")
-                            continue
+                    pair_addr = token.get("pairAddress")
+                    if not pair_addr:
+                        log.info(f"  → WAIT: No pairAddress yet for {mint[:8]}")
+                        continue
 
-                    sym = data.get("symbol", "UNKNOWN")[:20]
-                    fdv = float(data.get("fdv", 0) or 0)
-                    liq = float(data.get("liquidity", 0) or 0)
-                    vol = float(data.get("volume", {}).get("5m", 0) or 0)
+                    sym = token.get("symbol", "UNKNOWN")[:20]
+                    fdv = float(token.get("fullyDilutedValuation", 0) or 0)
+                    liq = float(token.get("liquidity", 0) or 0)
+                    vol = float(token.get("volume24h", 0) or 0) / 4.8  # Approx 5m from 24h
 
                     log.info(f"CHECK {sym} | FDV ${fdv:,.0f} | Vol ${vol:,.0f} | Liq ${liq:,.0f}")
 
-                    safe, reason = await is_rug_proof(mint, sess)
+                    safe, reason = await is_rug_proof(mint, pair_addr, sess)
                     log.info(f"  → RUG: {'PASS' if safe else 'FAIL'} | {reason}")
                     if not safe:
                         continue
@@ -337,7 +322,7 @@ async def premium_pump_scanner(app: Application):
                             msg = format_alert(sym, mint, liq, fdv, vol, level)
                             await broadcast(msg, InlineKeyboardMarkup(kb) if kb else None)
 
-                log.info(f"Scanner: {len([t for t in new_tokens if t.get('tokenAddress') in seen])} tokens processed")
+                log.info(f"Scanner: {len([t for t in new_tokens if t.get('tokenAddress') in seen and token.get('pairAddress')])} tokens processed")
 
             except Exception as e:
                 log.exception(f"Scanner crashed: {e}")
