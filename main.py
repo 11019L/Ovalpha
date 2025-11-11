@@ -54,6 +54,7 @@ MORALIS_URL = "https://solana-gateway.moralis.io/token/mainnet/exchange/pumpfun/
 PUMPPORTAL_TOKEN = "https://pumpportal.fun/api/data/token-info?address={}"
 PUMPFUN_PAIR = "https://frontend-api.pump.fun/pairs/{}"
 
+
 # Thresholds
 MIN_LIQUIDITY = 75
 MIN_FDVS_SNIPE = 2500
@@ -169,14 +170,12 @@ def get_referral_link(uid: int) -> str:
 # --------------------------------------------------------------------------- #
 async def is_rug_proof(mint: str, pair_addr: str, sess) -> tuple[bool, str]:
     try:
-        # MINT FROZEN?
         payload = {"jsonrpc": "2.0", "id": 1, "method": "getAccountInfo", "params": [mint, {"encoding": "jsonParsed"}]}
         async with sess.post(SOLANA_RPC, json=payload, timeout=8) as r:
             if r.status != 200: return False, "RPC error"
             info = (await r.json()).get("result", {}).get("value", {}).get("data", {}).get("parsed", {}).get("info", {})
             if info.get("mintAuthority"): return False, "Mint not frozen"
 
-        # LP BURNED?
         payload = {"jsonrpc": "2.0", "id": 1, "method": "getTokenLargestAccounts", "params": [pair_addr]}
         async with sess.post(SOLANA_RPC, json=payload, timeout=8) as r:
             if r.status != 200: return False, "RPC error"
@@ -184,7 +183,6 @@ async def is_rug_proof(mint: str, pair_addr: str, sess) -> tuple[bool, str]:
             if top.get("address") != "dead111111111111111111111111111111111111111":
                 return False, "LP not burned"
 
-        # DEV HOLDINGS < 10%
         payload = {"jsonrpc": "2.0", "id": 1, "method": "getTokenSupply", "params": [mint]}
         async with sess.post(SOLANA_RPC, json=payload, timeout=8) as r:
             if r.status != 200: return False, "RPC error"
@@ -276,15 +274,21 @@ async def premium_pump_scanner(app: Application):
 
                     seen[mint] = time.time()
 
-                    pair_addr = token.get("pairAddress")
-                    if not pair_addr:
-                        log.info(f"  → WAIT: No pairAddress yet for {mint[:8]}")
-                        continue
+                    # GET pairAddress FROM pump.fun
+                    async with sess.get(PUMPFUN_PAIR.format(mint), timeout=10) as r:
+                        if r.status != 200:
+                            log.info(f"  → SKIP: No pair API for {mint[:8]}")
+                            continue
+                        pair_data = await r.json()
+                        pair_addr = pair_data.get("pairAddress")
+                        if not pair_addr:
+                            log.info(f"  → SKIP: No pairAddress in API for {mint[:8]}")
+                            continue
 
                     sym = token.get("symbol", "UNKNOWN")[:20]
                     fdv = float(token.get("fullyDilutedValuation", 0) or 0)
                     liq = float(token.get("liquidity", 0) or 0)
-                    vol = float(token.get("volume24h", 0) or 0) / 4.8  # Approx 5m from 24h
+                    vol = float(token.get("volume24h", 0) or 0) / 4.8
 
                     log.info(f"CHECK {sym} | FDV ${fdv:,.0f} | Vol ${vol:,.0f} | Liq ${liq:,.0f}")
 
@@ -292,6 +296,8 @@ async def premium_pump_scanner(app: Application):
                     log.info(f"  → RUG: {'PASS' if safe else 'FAIL'} | {reason}")
                     if not safe:
                         continue
+
+                    # ... rest of your logic (whale, snipe, etc)
 
                     whale = await detect_large_buy(mint, sess)
                     if whale >= MIN_WHALE_USD:
