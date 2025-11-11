@@ -280,9 +280,6 @@ async def detect_large_buy(mint: str, sess) -> float:
         return largest
     except: return 0
 
-# --------------------------------------------------------------------------- #
-#                               SCANNER (DEXSCREENER ONLY)
-# --------------------------------------------------------------------------- #
 async def premium_pump_scanner(app: Application):
     volume_hist = defaultdict(lambda: deque(maxlen=4))
     async with aiohttp.ClientSession() as sess:
@@ -315,7 +312,7 @@ async def premium_pump_scanner(app: Application):
 
                 log.info(f"Found {len(new_tokens)} NEW pump.fun tokens")
 
-                                for token in new_tokens:
+                for token in new_tokens:
                     mint = token.get("tokenAddress")
                     if not mint or mint in seen:
                         continue
@@ -323,21 +320,22 @@ async def premium_pump_scanner(app: Application):
                     seen[mint] = time.time()
 
                     sym = token.get("symbol", "UNKNOWN")[:20]
-                    fdv = float(token.get("fullyDilutedValuation", 0) or 0)
-                    liq = float(token.get("liquidity", 0) or 0)
-                    vol = float(token.get("volume24h", 0) or 0) / 4.8
+                    fdv_raw = token.get("fullyDilutedValuation", 0)
+                    fdv = float(fdv_raw) if fdv_raw else 0.0
+                    liq_raw = token.get("liquidity", 0)
+                    liq = float(liq_raw) if liq_raw else 0.0
+                    vol_raw = token.get("volume24h", 0)
+                    vol = float(vol_raw) / 4.8 if vol_raw else 0.0
 
                     log.info(f"CHECK {sym} | FDV ${fdv:,.0f} | Vol ${vol:,.0f} | Liq ${liq:,.0f}")
 
+                    # RUG CHECK USING PUMP.FUN API (GETS pairAddress)
                     safe, reason = await is_rug_proof(mint, sess)
                     log.info(f"  → RUG: {'PASS' if safe else 'FAIL'} | {reason}")
                     if not safe:
                         continue
 
-                    # ... rest of logic (whale, snipe, etc)
-
-                    safe, reason = await is_rug_proof(mint, sess, pair_addr)
-
+                    # WHALE DETECTION
                     whale = await detect_large_buy(mint, sess)
                     if whale >= MIN_WHALE_USD:
                         extra = f"**\\${whale:,.0f} WHALE BUY**\\n"
@@ -346,10 +344,12 @@ async def premium_pump_scanner(app: Application):
                         await broadcast(msg, InlineKeyboardMarkup(kb))
                         continue
 
+                    # VOLUME SPIKE
                     hist = volume_hist[mint]
                     hist.append(vol)
                     spike = len(hist) > 1 and vol >= (sum(hist[:-1]) / len(hist[:-1])) * 2.2
 
+                    # LEVEL LOGIC
                     level = None
                     if fdv >= MIN_FDVS_SNIPE and vol <= MAX_VOL_SNIPE:
                         level = "snipe"
@@ -372,6 +372,7 @@ async def premium_pump_scanner(app: Application):
             except Exception as e:
                 log.exception(f"Scanner crashed: {e}")
                 await asyncio.sleep(20)
+
 # --------------------------------------------------------------------------- #
 #                               REFERRAL & PAY
 # --------------------------------------------------------------------------- #
