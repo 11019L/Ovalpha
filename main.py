@@ -49,14 +49,8 @@ ETHERSCAN_KEY = os.getenv("ETHERSCAN_KEY", "")
 DATA_FILE = Path("data.json")
 SAVE_INTERVAL = 30
 SOLANA_RPC = os.getenv("SOLANA_RPC", "https://api.mainnet-beta.solana.com")
-log.info(f"Using SOLANA_RPC: {SOLANA_RPC[:50]}...")  # DEBUG
-log.info(f"HELLO @alwaysgamble — USING RPC: {SOLANA_RPC}")
-DEXSCREENER_SEARCH = "https://api.dexscreener.com/latest/dex/search"
 DEXSCREENER_TOKEN = "https://api.dexscreener.com/latest/dex/tokens"
-PUMPFUN_TOKENS = "https://frontend-api.pump.fun/tokens?offset=0&limit=50&sort=created_timestamp&order=desc"
-BLOXROUTE_WS = "wss://pump-ny.solana.dex.blxrbdn.com/ws"
 MORALIS_URL = "https://solana-gateway.moralis.io/token/mainnet/exchange/pumpfun/new"
-PUMPFUN_TOKEN_DETAIL = "https://frontend-api.pump.fun/tokens/{}"
 PUMPPORTAL_TOKEN = "https://pumpportal.fun/api/data/token-info?address={}"
 
 # Thresholds
@@ -111,7 +105,6 @@ token_state = data.get("token_state", {})
 # seen is IN-MEMORY ONLY — NEVER SAVED OR LOADED
 seen = {}
 log.info("SEEN CACHE: IN-MEMORY ONLY — NO FILE, NO LOAD")
-# FORCE CLEAR ON START — RAILWAY RESTARTS
 seen.clear()
 log.info("SEEN CACHE: FORCE CLEARED ON START")
 data["revenue"] = data.get("revenue", 0.0)
@@ -120,7 +113,7 @@ save_lock = asyncio.Lock()
 def save_data(data):
     try:
         saveable = data.copy()
-        saveable.pop("seen", None)  # NEVER SAVE seen
+        saveable.pop("seen", None)
         for mint, state in saveable.get("token_state", {}).items():
             if "sent" in state:
                 state["sent"] = list(state["sent"])
@@ -175,7 +168,6 @@ def get_referral_link(uid: int) -> str:
 # --------------------------------------------------------------------------- #
 async def is_rug_proof(mint: str, sess) -> tuple[bool, str]:
     try:
-        # === 1. GET TOKEN INFO FROM PUMPPORTAL (INCLUDES PAIR) ===
         async with sess.get(PUMPPORTAL_TOKEN.format(mint), timeout=10) as r:
             if r.status != 200:
                 return False, "No token data"
@@ -185,51 +177,38 @@ async def is_rug_proof(mint: str, sess) -> tuple[bool, str]:
             pair_addr = data.get("pair")
             if not pair_addr:
                 return False, "No pair"
-            log.debug(f"PumpPortal pair for {mint[:8]}: {pair_addr}")
 
-        # === 2. MINT FROZEN? ===
-        for attempt in range(3):
-            try:
-                payload = {"jsonrpc": "2.0", "id": 1, "method": "getAccountInfo", "params": [mint, {"encoding": "jsonParsed"}]}
-                async with sess.post(SOLANA_RPC, json=payload, timeout=8) as r:
-                    if r.status != 200: continue
-                    info = (await r.json()).get("result", {}).get("value", {}).get("data", {}).get("parsed", {}).get("info", {})
-                    if info.get("mintAuthority"): return False, "Mint not frozen"
-                    break
-            except: pass
-        else: return False, "RPC failed"
+        payload = {"jsonrpc": "2.0", "id": 1, "method": "getAccountInfo", "params": [mint, {"encoding": "jsonParsed"}]}
+        async with sess.post(SOLANA_RPC, json=payload, timeout=8) as r:
+            if r.status != 200:
+                return False, "RPC error"
+            info = (await r.json()).get("result", {}).get("value", {}).get("data", {}).get("parsed", {}).get("info", {})
+            if info.get("mintAuthority"):
+                return False, "Mint not frozen"
 
-        # === 3. LP BURNED? ===
-        for attempt in range(3):
-            try:
-                payload = {"jsonrpc": "2.0", "id": 1, "method": "getTokenLargestAccounts", "params": [pair_addr]}
-                async with sess.post(SOLANA_RPC, json=payload, timeout=8) as r:
-                    if r.status != 200: continue
-                    top = (await r.json()).get("result", {}).get("value", [{}])[0]
-                    if top.get("address") != "dead111111111111111111111111111111111111111":
-                        return False, "LP not burned"
-                    break
-            except: pass
-        else: return False, "RPC failed"
+        payload = {"jsonrpc": "2.0", "id": 1, "method": "getTokenLargestAccounts", "params": [pair_addr]}
+        async with sess.post(SOLANA_RPC, json=payload, timeout=8) as r:
+            if r.status != 200:
+                return False, "RPC error"
+            top = (await r.json()).get("result", {}).get("value", [{}])[0]
+            if top.get("address") != "dead111111111111111111111111111111111111111":
+                return False, "LP not burned"
 
-        # === 4. DEV HOLDINGS < 10% ===
-        for attempt in range(3):
-            try:
-                payload = {"jsonrpc": "2.0", "id": 1, "method": "getTokenSupply", "params": [mint]}
-                async with sess.post(SOLANA_RPC, json=payload, timeout=8) as r:
-                    if r.status != 200: continue
-                    total = float((await r.json()).get("result", {}).get("value", {}).get("uiAmount", 0) or 0)
-                    if total == 0: return False, "No supply"
+        payload = {"jsonrpc": "2.0", "id": 1, "method": "getTokenSupply", "params": [mint]}
+        async with sess.post(SOLANA_RPC, json=payload, timeout=8) as r:
+            if r.status != 200:
+                return False, "RPC error"
+            total = float((await r.json()).get("result", {}).get("value", {}).get("uiAmount", 0) or 0)
+            if total == 0:
+                return False, "No supply"
 
-                payload = {"jsonrpc": "2.0", "id": 1, "method": "getTokenLargestAccounts", "params": [mint]}
-                async with sess.post(SOLANA_RPC, json=payload, timeout=8) as r:
-                    if r.status != 200: continue
-                    held = float((await r.json()).get("result", {}).get("value", [{}])[0].get("uiAmount", 0) or 0)
-                    if total > 0 and (held / total) > 0.10:
-                        return False, f"Dev holds {(held/total)*100:.1f}%"
-                    break
-            except: pass
-        else: return False, "RPC failed"
+        payload = {"jsonrpc": "2.0", "id": 1, "method": "getTokenLargestAccounts", "params": [mint]}
+        async with sess.post(SOLANA_RPC, json=payload, timeout=8) as r:
+            if r.status != 200:
+                return False, "RPC error"
+            held = float((await r.json()).get("result", {}).get("value", [{}])[0].get("uiAmount", 0) or 0)
+            if total > 0 and (held / total) > 0.10:
+                return False, f"Dev holds {(held/total)*100:.1f}%"
 
         return True, "SAFE"
     except Exception as e:
@@ -276,35 +255,28 @@ async def detect_large_buy(mint: str, sess) -> float:
         return largest
     except: return 0
 
+# --------------------------------------------------------------------------- #
+#                               SCANNER
+# --------------------------------------------------------------------------- #
 async def premium_pump_scanner(app: Application):
     volume_hist = defaultdict(lambda: deque(maxlen=4))
     async with aiohttp.ClientSession() as sess:
         while True:
             try:
-                await asyncio.sleep(random.uniform(10, 20))  # 10-20s scans
-                tokens = []
-
-                # CORRECT MORALIS PUMP.FUN ENDPOINT
-                MORALIS_URL = "https://solana-gateway.moralis.io/token/mainnet/exchange/pumpfun/new"
+                await asyncio.sleep(random.uniform(10, 20))
                 headers = {"accept": "application/json", "X-API-Key": os.getenv("MORALIS_API_KEY")}
                 if not headers["X-API-Key"]:
-                    log.error("MORALIS_API_KEY missing in .env — get free key from moralis.com")
+                    log.error("MORALIS_API_KEY missing")
                     await asyncio.sleep(60)
                     continue
 
                 log.info("Fetching NEW pump.fun tokens from Moralis API...")
-                async with sess.get(
-                    f"{MORALIS_URL}?limit=50",
-                    headers=headers,
-                    timeout=15
-                ) as r:
+                async with sess.get(f"{MORALIS_URL}?limit=50", headers=headers, timeout=15) as r:
                     if r.status != 200:
                         log.error(f"Moralis API error: {r.status}")
                         await asyncio.sleep(30)
                         continue
-
-                    data = await r.json()
-                    new_tokens = data.get("result", [])[:50]  # Newest 50 tokens
+                    new_tokens = (await r.json()).get("result", [])[:50]
 
                 log.info(f"Found {len(new_tokens)} NEW pump.fun tokens")
 
@@ -315,12 +287,13 @@ async def premium_pump_scanner(app: Application):
 
                     seen[mint] = time.time()
 
-                    # GET FULL DATA FROM PUMPPORTAL
                     async with sess.get(PUMPPORTAL_TOKEN.format(mint), timeout=10) as r:
                         if r.status != 200:
+                            log.info(f"  → SKIP: No data for {mint[:8]}")
                             continue
                         data = await r.json()
                         if not data.get("success"):
+                            log.info(f"  → SKIP: Invalid data for {mint[:8]}")
                             continue
 
                     sym = data.get("symbol", "UNKNOWN")[:20]
@@ -335,7 +308,6 @@ async def premium_pump_scanner(app: Application):
                     if not safe:
                         continue
 
-                    # WHALE
                     whale = await detect_large_buy(mint, sess)
                     if whale >= MIN_WHALE_USD:
                         extra = f"**\\${whale:,.0f} WHALE BUY**\\n"
@@ -344,12 +316,10 @@ async def premium_pump_scanner(app: Application):
                         await broadcast(msg, InlineKeyboardMarkup(kb))
                         continue
 
-                    # SPIKE
                     hist = volume_hist[mint]
                     hist.append(vol)
                     spike = len(hist) > 1 and vol >= (sum(hist[:-1]) / len(hist[:-1])) * 2.2
 
-                    # LEVEL
                     level = None
                     if fdv >= MIN_FDVS_SNIPE and vol <= MAX_VOL_SNIPE:
                         level = "snipe"
@@ -367,11 +337,12 @@ async def premium_pump_scanner(app: Application):
                             msg = format_alert(sym, mint, liq, fdv, vol, level)
                             await broadcast(msg, InlineKeyboardMarkup(kb) if kb else None)
 
-                log.info(f"Scanner: {len(tokens)} tokens processed")
+                log.info(f"Scanner: {len([t for t in new_tokens if t.get('tokenAddress') in seen])} tokens processed")
 
             except Exception as e:
                 log.exception(f"Scanner crashed: {e}")
                 await asyncio.sleep(20)
+
 # --------------------------------------------------------------------------- #
 #                               REFERRAL & PAY
 # --------------------------------------------------------------------------- #
@@ -562,9 +533,4 @@ async def main():
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        log.info("Bot stopped.")
-    except Exception as e:
-        log.exception(f"Crash: {e}")
+    asyncio.run(main())
