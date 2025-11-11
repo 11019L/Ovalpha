@@ -263,7 +263,14 @@ async def premium_pump_scanner(app: Application):
                 await asyncio.sleep(random.uniform(15, 25))  # Avoid rate limit
                 tokens = []
 
-                                log.info("Fetching pump.fun tokens from DexScreener...")
+                # ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
+                # ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
+                # ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
+                log.info("Fetching pump.fun tokens from DexScreener...")
+                # ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
+                # ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
+                # ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
+
                 async with sess.get(
                     DEXSCREENER_SEARCH,
                     params={
@@ -315,7 +322,7 @@ async def premium_pump_scanner(app: Application):
                 processed = 0
                 for t in tokens:
                     mint = t["mint"]
-                    seen[mint] = time.time()  # Add to seen
+                    seen[mint] = time.time()
 
                     sym = t["symbol"]
                     fdv = t["fdv"]
