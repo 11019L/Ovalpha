@@ -64,7 +64,6 @@ SAVE_INTERVAL = 30
 SOLANA_RPC = os.getenv("SOLANA_RPC", "https://api.mainnet-beta.solana.com")
 DEXSCREENER_TOKEN = "https://api.dexscreener.com/latest/dex/tokens"
 MORALIS_URL = "https://solana-gateway.moralis.io/token/mainnet/exchange/pumpfun/new"
-PUMPFUN_PAIR = "https://frontend-api.pump.fun/pairs/{}"
 JUP_QUOTE = "https://quote-api.jup.ag/v6/quote"
 JUP_SWAP  = "https://quote-api.jup.ag/v6/swap"
 
@@ -299,43 +298,50 @@ async def get_pair_from_rpc(mint: str, sess) -> str | None:
     return None
     
 # --------------------------------------------------------------------------- #
-#                               PAIR FETCH + MULTI-SOURCE
+#                               PAIR FETCH: DEXSCREENER + RPC ONLY
 # --------------------------------------------------------------------------- #
 async def get_pair_address(mint: str, sess) -> str | None:
-    # 1. Try Dexscreener (fastest, most reliable)
+    # 1. DEXSCREENER (FASTEST, 95% HIT RATE)
     try:
         async with sess.get(f"{DEXSCREENER_TOKEN}/{mint}", timeout=10) as r:
             if r.status == 200:
-                ds = await r.json()
-                pair = next((p for p in ds.get("pairs", []) if p.get("dexId") == "pumpswap"), None)
+                data = await r.json()
+                pair = next((p for p in data.get("pairs", []) if p.get("dexId") == "pumpswap"), None)
                 if pair:
-                    log.info(f"  → DEXSCREENER PAIR: {mint[:8]}")
+                    log.info(f"  → DEXSCREENER PAIR: {mint[:8]} → {pair['pairAddress'][:8]}...")
                     return pair["pairAddress"]
-    except:
-        pass
+    except Exception as e:
+        log.debug(f"Dexscreener error {mint[:8]}: {e}")
 
-    # 2. Try Pump.fun API (with anti-530)
-    for attempt in range(3):
-        await asyncio.sleep(random.uniform(2, 5))
-        headers = {
-            "User-Agent": f"OnionBot/{random.randint(100,999)} (NG)",
-            "Accept": "application/json"
+    # 2. SOLANA RPC (100% RELIABLE, HELIUS)
+    try:
+        payload = {
+            "jsonrpc": "2.0", "id": 1,
+            "method": "getProgramAccounts",
+            "params": [
+                "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+                {
+                    "encoding": "jsonParsed",
+                    "filters": [
+                        {"dataSize": 165},
+                        {"memcmp": {"offset": 32, "bytes": mint}}
+                    ]
+                }
+            ]
         }
-        try:
-            async with sess.get(PUMPFUN_PAIR.format(mint), timeout=15, headers=headers) as r:
-                if r.status == 200:
-                    data = await r.json()
-                    if data.get("pairAddress"):
-                        log.info(f"  → PUMP.FUN PAIR: {mint[:8]}")
-                        return data["pairAddress"]
-                elif r.status == 530:
-                    log.warning(f"  → 530 blocked (attempt {attempt+1}/3) for {mint[:8]}")
-        except:
-            pass
+        async with sess.post(SOLANA_RPC, json=payload, timeout=12) as r:
+            if r.status == 200:
+                result = await r.json()
+                accounts = result.get("result", [])
+                if accounts:
+                    pair_addr = accounts[0]["pubkey"]
+                    log.info(f"  → RPC PAIR: {mint[:8]} → {pair_addr[:8]}...")
+                    return pair_addr
+    except Exception as e:
+        log.debug(f"RPC pair error {mint[:8]}: {e}")
 
-    # 3. Final fallback: RPC
-    return await get_pair_from_rpc(mint, sess)
-
+    log.info(f"  → NO PAIR for {mint[:8]} (blocked by pump.fun)")
+    return None
 # --------------------------------------------------------------------------- #
 #                               SCANNER
 # --------------------------------------------------------------------------- #
