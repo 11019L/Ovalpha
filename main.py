@@ -281,8 +281,9 @@ async def premium_pump_scanner(app: Application):
 
                 log.info(f"Found {len(pairs)} pump.fun pairs")
 
-                    for p in pairs:
-                    # NEW FILTER: Only Raydium + pumpdotfun
+                # === FIXED INDENTATION: for loop starts here ===
+                for p in pairs:
+                    # Filter: Only Raydium or pumpdotfun DEX
                     if p.get("dexId") not in ["raydium", "pumpdotfun"]:
                         continue
                     base = p.get("baseToken")
@@ -306,6 +307,7 @@ async def premium_pump_scanner(app: Application):
 
                 log.info(f"Processing {len(tokens)} NEW tokens")
                 log.info(f"DEBUG: Seen cache size: {len(seen)} | Total pairs: {len(pairs)}")
+
                 processed = 0
                 for t in tokens:
                     mint = t["mint"]
@@ -320,7 +322,8 @@ async def premium_pump_scanner(app: Application):
 
                     safe, reason = await is_rug_proof(mint, sess)
                     log.info(f"  → RUG: {'PASS' if safe else 'FAIL'} | {reason}")
-                    if not safe: continue
+                    if not safe:
+                        continue
 
                     whale = await detect_large_buy(mint, sess)
                     if whale >= MIN_WHALE_USD:
