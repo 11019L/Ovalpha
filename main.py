@@ -170,8 +170,11 @@ def get_referral_link(uid: int) -> str:
 # --------------------------------------------------------------------------- #
 async def is_rug_proof(mint: str, sess) -> tuple[bool, str]:
     try:
+        # 1. Check mint authority (frozen?)
         payload = {"jsonrpc": "2.0", "id": 1, "method": "getAccountInfo", "params": [mint, {"encoding": "jsonParsed"}]}
-        async with sess.post(SOLANA_RPC, json=payload, timeout=10) as r:
+        async with sess.post(SOLANA_RPC, json=payload, timeout=8) as r:
+            if r.status != 200:
+                return False, "RPC down"
             acc = await r.json()
             if not acc.get("result", {}).get("value"):
                 return False, "Invalid mint"
@@ -179,30 +182,39 @@ async def is_rug_proof(mint: str, sess) -> tuple[bool, str]:
             if info.get("mintAuthority"):
                 return False, "Mint not frozen"
 
-        async with sess.get(f"{DEXSCREENER_TOKEN}/{mint}", timeout=10) as r:
-            if r.status != 200: return False, "No pair"
+        # 2. Check LP burn
+        async with sess.get(f"{DEXSCREENER_TOKEN}/{mint}", timeout=8) as r:
+            if r.status != 200:
+                return False, "No pair"
             data = await r.json()
             pair = next((p for p in data.get("pairs", []) if p["quoteToken"]["symbol"] == "SOL"), None)
-            if not pair: return False, "No SOL pair"
-            liq = pair["liquidity"]["usd"]
-            if liq < MIN_LIQUIDITY: return False, f"Low liq ${liq:.0f}"
+            if not pair:
+                return False, "No SOL pair"
             pair_addr = pair["pairAddress"]
 
         payload = {"jsonrpc": "2.0", "id": 1, "method": "getTokenLargestAccounts", "params": [pair_addr]}
-        async with sess.post(SOLANA_RPC, json=payload, timeout=10) as r:
+        async with sess.post(SOLANA_RPC, json=payload, timeout=8) as r:
+            if r.status != 200:
+                return False, "RPC down"
             holders = await r.json()
             top = holders.get("result", {}).get("value", [{}])[0]
             if top.get("address") != "dead111111111111111111111111111111111111111":
                 return False, "LP not burned"
 
+        # 3. Check dev holdings
         payload = {"jsonrpc": "2.0", "id": 1, "method": "getTokenSupply", "params": [mint]}
-        async with sess.post(SOLANA_RPC, json=payload, timeout=10) as r:
+        async with sess.post(SOLANA_RPC, json=payload, timeout=8) as r:
+            if r.status != 200:
+                return False, "RPC down"
             supply = await r.json()
             total = float(supply.get("result", {}).get("value", {}).get("uiAmount", 0) or 0)
-            if total == 0: return False, "No supply"
+            if total == 0:
+                return False, "No supply"
 
         payload = {"jsonrpc": "2.0", "id": 1, "method": "getTokenLargestAccounts", "params": [mint]}
-        async with sess.post(SOLANA_RPC, json=payload, timeout=10) as r:
+        async with sess.post(SOLANA_RPC, json=payload, timeout=8) as r:
+            if r.status != 200:
+                return False, "RPC down"
             holders = await r.json()
             top = holders.get("result", {}).get("value", [{}])[0]
             held = float(top.get("uiAmount", 0) or 0)
@@ -210,6 +222,8 @@ async def is_rug_proof(mint: str, sess) -> tuple[bool, str]:
                 return False, f"Dev holds {(held/total)*100:.1f}%"
 
         return True, "SAFE"
+    except asyncio.TimeoutError:
+        return False, "RPC timeout"
     except Exception as e:
         log.debug(f"Rug check failed {mint[:8]}: {e}")
         return False, "Check error"
