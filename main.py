@@ -266,7 +266,11 @@ async def premium_pump_scanner(app: Application):
                 log.info("Fetching pump.fun tokens from DexScreener...")
                 async with sess.get(
                     DEXSCREENER_SEARCH,
-                    params={"q": "pump.fun", "chainId": "solana"},
+                    params={
+                        "q": "pump.fun",
+                        "chainId": "solana",
+                        "t": int(time.time())  # Force fresh data
+                    },
                     timeout=15
                 ) as r:
                     if r.status == 429:
