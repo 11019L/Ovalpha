@@ -170,7 +170,40 @@ def format_alert(sym, addr, liq, fdv, vol, level, extra=""):
 def get_referral_link(uid: int) -> str:
     username = users[uid].get("username", f"user{uid}")
     return f"https://t.me/{app.bot.username}?start=ref_{username}"
+async def process_token(pair, sess, volume_hist, token_state):
+    try:
+        mint = pair["baseToken"]["address"]
+        sym = pair["baseToken"]["symbol"][:20]
+        fdv = float(pair.get("fdv", 0) or 0)
+        liq = float(pair.get("liquidity", {}).get("usd", 0) or 0)
+        vol_5m = float(pair.get("volume", {}).get("m5", 0) or 0)
+        pair_addr = pair.get("pairAddress")
 
+        if fdv == 0 or liq == 0 or not pair_addr:
+            return
+
+        log.info(f"RESCAN {sym} | FDV ${fdv:,.0f} | Vol ${vol_5m:,.0f}")
+
+        safe, reason = await is_rug_proof(mint, pair_addr, sess)
+        if not safe:
+            return
+
+        # WHALE / PUMP / CONFIRM
+        whale = await detect_large_buy(mint, sess)
+        if whale >= MIN_WHALE_USD:
+            msg = format_alert(sym, mint, liq, fdv, vol_5m, "whale", f"**\\${whale:,.0f} WHALE**\\n")
+            await broadcast(msg, None)
+
+        hist = volume_hist[mint]
+        hist.append(vol_5m)
+        if len(hist) >= 2 and vol_5m >= hist[-2] * 3.0 and vol_5m >= MIN_VOL_PUMP:
+            if "pump" not in token_state.get(mint, {}).get("sent", set()):
+                msg = format_alert(sym, mint, liq, fdv, vol_5m, "pump")
+                await broadcast(msg, None)
+                token_state.setdefault(mint, {})["sent"].add("pump")
+
+    except Exception as e:
+        log.debug(f"Rescan error: {e}")
 # --------------------------------------------------------------------------- #
 #                               RUG CHECK
 # --------------------------------------------------------------------------- #
@@ -363,7 +396,20 @@ async def premium_pump_scanner(app: Application):
 
                 log.info(f"Found {len(pairs)} new pump.fun pairs")
                 now = time.time()
-
+                # === RESCAN OLD TOKENS EVERY 2 MINUTES (CATCH PUMPS) ===
+                if int(time.time()) % 120 == 0:  # Every 2 minutes
+                log.info("RESCANNING OLD TOKENS FOR PUMP SIGNALS")
+                old_pairs_url = "https://api.dexscreener.com/latest/dex/search?q=pumpfun&orderBy=volume24h&orderDir=desc&limit=50"
+                async with sess.get(old_pairs_url, timeout=15) as r:
+                if r.status == 200:
+                old_data = await r.json()
+                old_pairs = old_data.get("pairs", [])[:50]
+                for pair in old_pairs:
+                mint = pair.get("baseToken", {}).get("address")
+                if not mint or mint not in seen:
+                    continue  # Only rescan previously seen
+                # Force reprocess
+                await process_token(pair, sess, volume_hist, token_state)
                 # Clean seen cache
                 old = [m for m, t in seen.items() if now - t > 3600]
                 for m in old: del seen[m]
