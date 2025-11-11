@@ -256,117 +256,42 @@ async def detect_large_buy(mint: str, sess) -> float:
 #                               SCANNER (DEXSCREENER ONLY)
 # --------------------------------------------------------------------------- #
 async def premium_pump_scanner(app: Application):
-    volume_hist = defaultdict(lambda: deque(maxlen=4))
-    async with aiohttp.ClientSession() as sess:
-        while True:
-            try:
-                await asyncio.sleep(random.uniform(15, 25))  # Avoid rate limit
-                tokens = []
+    import websockets
 
-                log.info("Fetching pump.fun tokens from DexScreener...")
-                async with sess.get(
-                    DEXSCREENER_SEARCH,
-                    params={
-                        "q": "pump",
-                        "chainId": "solana",
-                        "t": int(time.time())  # Force fresh data
-                    },
-                    timeout=15
-                ) as r:
-                    if r.status == 429:
-                        backoff = random.uniform(60, 120)
-                        log.warning(f"Rate limited. Backing off {backoff:.0f}s...")
-                        await asyncio.sleep(backoff)
-                        continue
-                    if r.status != 200:
-                        log.error(f"HTTP {r.status}")
-                        await asyncio.sleep(30)
-                        continue
+    async def listen_to_pump():
+        uri = "wss://pumpportal.fun/api/data"
+        async with websockets.connect(uri) as ws:
+            # Subscribe to new tokens
+            await ws.send(json.dumps({"method": "subscribeNewToken"}))
+            while True:
+                try:
+                    msg = json.loads(await ws.recv())
+                    if msg.get("method") == "newToken":
+                        token = msg["data"]
+                        mint = token["mint"]
+                        if mint in seen:
+                            continue
+                        seen[mint] = time.time()
 
-                    data = await r.json()
-                    pairs = data.get("pairs", [])[:120]
+                        log.info(f"NEW PUMP.FUN: {token['symbol']} | CA: {mint[:8]}...")
 
-                log.info(f"Found {len(pairs)} pairs")
+                        # Rug check + alert
+                        async with aiohttp.ClientSession() as sess:
+                            safe, reason = await is_rug_proof(mint, sess)
+                            if safe:
+                                msg = format_alert(
+                                    token["symbol"], mint,
+                                    token.get("liquidity", 0),
+                                    token.get("fdv", 0),
+                                    token.get("volume5m", 0),
+                                    "snipe"
+                                )
+                                await broadcast(msg)
+                except:
+                    await asyncio.sleep(5)
 
-                for p in pairs:
-    # CORRECT: pump.fun tokens are on Raydium
-                if p.get("dexId") != "raydium":
-                    continue
-                if "pump.fun" not in p.get("url", ""):
-                    continue
-            
-                base = p.get("baseToken")
-                if not base:
-                    continue
-            
-                mint = base["address"]
-                if mint in seen:
-                    continue
-            
-                tokens.append({
-                    "mint": mint,
-                    "symbol": base["symbol"][:20],
-                    "fdv": float(p.get("fdv", 0) or 0),
-                    "liq": float(p.get("liquidity", {}).get("usd", 0) or 0),
-                    "vol5": float(p.get("volume", {}).get("m5", 0) or 0),
-                })
-                log.info(f"Processing {len(tokens)} NEW tokens")
-                log.info(f"DEBUG: Seen cache size: {len(seen)} | Total pairs: {len(pairs)}")
-                if len(seen) > 0:
-                    log.info(f"SEEN MINTS: {list(seen.keys())[:3]}...")
-
-                processed = 0
-                for t in tokens:
-                    mint = t["mint"]
-                    seen[mint] = time.time()
-
-                    sym = t["symbol"]
-                    fdv = t["fdv"]
-                    liq = t["liq"]
-                    vol = t["vol5"]
-
-                    log.info(f"CHECK {sym} | FDV ${fdv:,.0f} | Vol ${vol:,.0f} | Liq ${liq:,.0f}")
-
-                    safe, reason = await is_rug_proof(mint, sess)
-                    log.info(f"  → RUG: {'PASS' if safe else 'FAIL'} | {reason}")
-                    if not safe:
-                        continue
-
-                    whale = await detect_large_buy(mint, sess)
-                    if whale >= MIN_WHALE_USD:
-                        msg = format_alert(sym, mint, liq, fdv, vol, "whale", f"**\\${whale:,.0f} WHALE BUY**\\n")
-                        kb = [[InlineKeyboardButton("BUY NOW", callback_data=f"askbuy_{mint}")]]
-                        await broadcast(msg, InlineKeyboardMarkup(kb))
-                        processed += 1
-                        continue
-
-                    hist = volume_hist[mint]
-                    hist.append(vol)
-                    spike = len(hist) > 1 and vol >= (sum(hist[:-1]) / len(hist[:-1])) * 2.2
-
-                    level = None
-                    if fdv >= MIN_FDVS_SNIPE and vol <= MAX_VOL_SNIPE:
-                        level = "snipe"
-                    elif fdv >= MIN_FDVS_CONFIRM and vol >= MIN_VOL_CONFIRM:
-                        level = "confirm"
-                    elif spike and vol >= MIN_VOL_PUMP:
-                        level = "pump"
-
-                    if level:
-                        state = token_state.setdefault(mint, {"sent": set()})
-                        if level not in state["sent"]:
-                            state["sent"].add(level)
-                            token_state[mint] = state
-                            kb = [[InlineKeyboardButton("BUY NOW", callback_data=f"askbuy_{mint}")]] if level == "snipe" else None
-                            msg = format_alert(sym, mint, liq, fdv, vol, level)
-                            await broadcast(msg, InlineKeyboardMarkup(kb) if kb else None)
-                            processed += 1
-
-                log.info(f"Scanner: {processed} alerts sent")
-
-            except Exception as e:
-                log.exception(f"Scanner crashed: {e}")
-                await asyncio.sleep(20)
+    asyncio.create_task(listen_to_pump())
+    await asyncio.Event().wait()
 # --------------------------------------------------------------------------- #
 #                               REFERRAL & PAY
 # --------------------------------------------------------------------------- #
