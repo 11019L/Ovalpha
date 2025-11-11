@@ -39,7 +39,7 @@ from telegram.helpers import escape_markdown
 #                               LOGGING & CONFIG
 # --------------------------------------------------------------------------- #
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,  # ← SHOW EVERYTHING (pair fetch, RPC calls, checks)
     format="%(asctime)s | %(levelname)s | %(message)s",
     datefmt="%H:%M:%S",
 )
