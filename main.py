@@ -95,18 +95,18 @@ def load_data():
             return raw
         except Exception as e:
             log.error(f"Load error: {e}")
-    return {"users": {}, "seen": {}, "token_state": {}, "revenue": 0.0}
+    return {"users": {}, "token_state": {}, "revenue": 0.0}
 
 data = load_data()
-users = data["users"]
-# seen is in-memory only — never saved
-# seen is IN-MEMORY ONLY — NEVER SAVED TO FILE
+users = data.get("users", {})
+token_state = data.get("token_state", {})
+
+# seen is IN-MEMORY ONLY — NEVER SAVED OR LOADED
 seen = {}
-log.info("SEEN CACHE: IN-MEMORY ONLY — NO FILE NEEDED")
-token_state = data["token_state"]
+log.info("SEEN CACHE: IN-MEMORY ONLY — NO FILE, NO LOAD")
+
 data["revenue"] = data.get("revenue", 0.0)
 save_lock = asyncio.Lock()
-
 
 def save_data(data):
     try:
@@ -297,7 +297,7 @@ async def premium_pump_scanner(app: Application):
                     })
 
                 log.info(f"Processing {len(tokens)} NEW tokens")
-
+                log.info(f"DEBUG: Seen cache size: {len(seen)} | Total pairs: {len(pairs)}")
                 processed = 0
                 for t in tokens:
                     mint = t["mint"]
