@@ -330,42 +330,6 @@ async def get_pair_from_rpc(mint: str, sess) -> str | None:
 # --------------------------------------------------------------------------- #
 #                               PAIR FETCH: DEXSCREENER + RPC ONLY
 # --------------------------------------------------------------------------- #
-async def get_pair_address(mint: str, sess) -> str | None:
-    # 1. Dexscreener (99% hit rate at 60s+)
-    try:
-        async with sess.get(f"{DEXSCREENER_TOKEN}/{mint}", timeout=10) as r:
-            if r.status == 200:
-                data = await r.json()
-                pair = next((p for p in data.get("pairs", []) if p.get("dexId") == "pumpswap"), None)
-                if pair:
-                    log.info(f"  → PAIR: {mint[:8]} (Dexscreener)")
-                    return pair["pairAddress"]
-    except:
-        pass
-
-    # 2. RPC fallback
-    try:
-        payload = {
-            "jsonrpc": "2.0", "id": 1,
-            "method": "getProgramAccounts",
-            "params": [
-                "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
-                {"encoding": "jsonParsed", "filters": [{"dataSize": 165}, {"memcmp": {"offset": 32, "bytes": mint}}]}
-            ]
-        }
-        async with sess.post(SOLANA_RPC, json=payload, timeout=12) as r:
-            if r.status == 200:
-                result = await r.json()
-                accounts = result.get("result", [])
-                if accounts:
-                    pair_addr = accounts[0]["pubkey"]
-                    log.info(f"  → PAIR: {mint[:8]} (RPC)")
-                    return pair_addr
-    except:
-        pass
-
-    log.info(f"  → NO PAIR: {mint[:8]} (should not happen at 60s+)")
-    return None
 # --------------------------------------------------------------------------- #
 #                               SCANNER
 # --------------------------------------------------------------------------- #
@@ -396,27 +360,28 @@ async def premium_pump_scanner(app: Application):
 
                 log.info(f"Found {len(pairs)} new pump.fun pairs")
                 now = time.time()
+
                 # === RESCAN OLD TOKENS EVERY 2 MINUTES (CATCH PUMPS) ===
                 if int(time.time()) % 120 == 0:  # Every 2 minutes
-                log.info("RESCANNING OLD TOKENS FOR PUMP SIGNALS")
-                old_pairs_url = "https://api.dexscreener.com/latest/dex/search?q=pumpfun&orderBy=volume24h&orderDir=desc&limit=50"
-                async with sess.get(old_pairs_url, timeout=15) as r:
-                if r.status == 200:
-                old_data = await r.json()
-                old_pairs = old_data.get("pairs", [])[:50]
-                for pair in old_pairs:
-                mint = pair.get("baseToken", {}).get("address")
-                if not mint or mint not in seen:
-                    continue  # Only rescan previously seen
-                # Force reprocess
-                await process_token(pair, sess, volume_hist, token_state)
-                # Clean seen cache
+                    log.info("RESCANNING OLD TOKENS FOR PUMP SIGNALS")
+                    old_pairs_url = "https://api.dexscreener.com/latest/dex/search?q=pumpfun&orderBy=volume24h&orderDir=desc&limit=50"
+                    async with sess.get(old_pairs_url, timeout=15) as r:
+                        if r.status == 200:
+                            old_data = await r.json()
+                            old_pairs = old_data.get("pairs", [])[:50]
+                            for pair in old_pairs:
+                                mint = pair.get("baseToken", {}).get("address")
+                                if not mint or mint not in seen:
+                                    continue
+                                await process_token(pair, sess, volume_hist, token_state)
+
+                # Clean seen cache (1h)
                 old = [m for m, t in seen.items() if now - t > 3600]
                 for m in old: del seen[m]
 
+                # === PROCESS NEW PAIRS ===
                 for pair in pairs:
                     try:
-                        # === VALIDATE PAIR DATA ===
                         base_token = pair.get("baseToken") or {}
                         mint = base_token.get("address")
                         if not mint or mint in seen:
@@ -435,7 +400,7 @@ async def premium_pump_scanner(app: Application):
 
                         seen[mint] = now
 
-                        # === EXTRACT METRICS SAFELY ===
+                        # === EXTRACT METRICS ===
                         sym = base_token.get("symbol", "UNKNOWN")[:20]
                         fdv = float(pair.get("fdv", 0) or 0)
                         liq = float(pair.get("liquidity", {}).get("usd", 0) or 0)
