@@ -341,6 +341,9 @@ async def get_pair_from_rpc(mint: str, sess) -> str | None:
 # --------------------------------------------------------------------------- #
 #                               SCANNER
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+#                               SCANNER
+# --------------------------------------------------------------------------- #
 async def premium_pump_scanner(app: Application):
     volume_hist = defaultdict(lambda: deque(maxlen=4))
     skip_counter = defaultdict(int)
@@ -399,29 +402,31 @@ async def premium_pump_scanner(app: Application):
                         if mint not in seen:
                             seen[mint] = time.time()
                             ready_queue.append(mint)
-                            log.debug(f"  → ADDED TO QUEUE: {mint[:8]} (will process in 60s)")
+                            log.debug(f"  → ADDED TO QUEUE: {mint[:8]} (will process in 180s)")
                             continue
 
                     except Exception as e:
                         log.debug(f"Queue add error: {e}")
                         continue
 
-                # === PROCESS READY QUEUE (60s+ OLD) ===
+                # === PROCESS READY QUEUE (180s+ OLD) ===
                 for mint in list(ready_queue):
-                    if time.time() - seen[mint] < 120:  # ← 2 MINUTES = SAFE
-                        log.debug(f"  → SKIP: {mint[:8]} waiting 120s for mint freeze")
+                    if time.time() - seen[mint] < 180:  # ← 3 MINUTES = FULL SAFETY
+                        log.debug(f"  → SKIP: {mint[:8]} waiting 180s for full safety")
                         continue
 
-                    log.info(f"  → 120s REACHED: {mint[:8]} → PROCESSING FROM QUEUE")
+                    log.info(f"  → 180s REACHED: {mint[:8]} → PROCESSING FROM QUEUE")
                     ready_queue.remove(mint)
 
                     # Fetch fresh data by mint
                     async with sess.get(f"https://api.dexscreener.com/latest/dex/token/{mint}", timeout=10) as r:
                         if r.status != 200:
+                            log.warning(f"Failed to fetch token data for {mint[:8]}: {r.status}")
                             continue
                         data = await r.json()
                         pair = next((p for p in data.get("pairs", []) if p.get("dexId") == "pumpswap"), None)
                         if not pair:
+                            log.warning(f"No pump.fun pair found for {mint[:8]}")
                             continue
 
                         try:
@@ -433,15 +438,17 @@ async def premium_pump_scanner(app: Application):
 
                             if fdv == 0 or liq == 0 or not pair_addr:
                                 skip_counter["bad_data"] += 1
+                                log.warning(f"Bad data for {mint[:8]}: FDV ${fdv}, Liq ${liq}")
                                 continue
 
                             log.info(f"QUEUE PROCESS {sym} | FDV ${fdv:,.0f} | Vol ${vol_5m:,.0f} | Liq ${liq:,.0f}")
 
                             # === RUG CHECK ===
                             safe, reason = await is_rug_proof(mint, pair_addr, sess)
-                            log.info(f"  → RUG: {'PASS' if safe else 'FAIL'} | {reason}")
+                            log.info(f"  → RUG CHECK: {'PASS' if safe else '**FAIL**'} | {reason}")
                             if not safe:
                                 skip_counter["rug"] += 1
+                                log.warning(f"  → RUG FAILED: {mint[:8]} | {reason}")
                                 continue
 
                             # === WHALE ===
