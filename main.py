@@ -409,11 +409,11 @@ async def premium_pump_scanner(app: Application):
                 # === PROCESS READY QUEUE (60s+ OLD) ===
                 for mint in list(ready_queue):
                     if time.time() - seen[mint] < 120:  # ← 2 MINUTES = SAFE
-                    log.debug(f"  → SKIP: {mint[:8]} waiting 120s for mint freeze")
+                        log.debug(f"  → SKIP: {mint[:8]} waiting 120s for mint freeze")
                         continue
 
-                    log.info(f"  → 60s REACHED: {mint[:8]} → PROCESSING FROM QUEUE")
-                    ready_queue.remove(mint)
+                    log.info(f"  → 120s REACHED: {mint[:8]} → PROCESSING FROM QUEUE")
+                    ready_queue.remove(mint))
 
                     # Fetch fresh data by mint
                     async with sess.get(f"https://api.dexscreener.com/latest/dex/token/{mint}", timeout=10) as r:
