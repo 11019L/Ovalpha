@@ -361,8 +361,8 @@ async def premium_pump_scanner(app: Application):
                 log.info(f"Found {len(pairs)} new pump.fun pairs")
                 now = time.time()
 
-                # === RESCAN OLD TOKENS EVERY 2 MINUTES (CATCH PUMPS) ===
-                if int(time.time()) % 120 == 0:  # Every 2 minutes
+                # === RESCAN OLD TOKENS EVERY 2 MINUTES ===
+                if int(time.time()) % 120 == 0:
                     log.info("RESCANNING OLD TOKENS FOR PUMP SIGNALS")
                     old_pairs_url = "https://api.dexscreener.com/latest/dex/search?q=pumpfun&orderBy=volume24h&orderDir=desc&limit=50"
                     async with sess.get(old_pairs_url, timeout=15) as r:
@@ -380,7 +380,7 @@ async def premium_pump_scanner(app: Application):
                 for m in old: del seen[m]
 
                 # === PROCESS NEW PAIRS ===
-                    for pair in pairs:
+                for pair in pairs:
                     try:
                         base_token = pair.get("baseToken") or {}
                         mint = base_token.get("address")
@@ -423,6 +423,15 @@ async def premium_pump_scanner(app: Application):
                             skip_counter["rug"] += 1
                             continue
 
+                        # === WHALE ===
+                        whale = await detect_large_buy(mint, sess)
+                        if whale >= MIN_WHALE_USD:
+                            extra = f"**\\${whale:,.0f} WHALE BUY**\\n"
+                            msg = format_alert(sym, mint, liq, fdv, vol_5m, "whale", extra)
+                            kb = [[InlineKeyboardButton("BUY NOW", callback_data=f"askbuy_{mint}")]]
+                            await broadcast(msg, InlineKeyboardMarkup(kb))
+                            continue
+
                         # === SNIPE LOGIC ===
                         hist = volume_hist[mint]
                         hist.append(vol_5m)
@@ -447,6 +456,7 @@ async def premium_pump_scanner(app: Application):
                     except Exception as e:
                         log.debug(f"Pair processing error: {e}")
                         continue
+
                 log.info(f"Scanner round | Skips: {dict(skip_counter)} | Seen: {len(seen)}")
                 skip_counter.clear()
 
