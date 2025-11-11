@@ -289,7 +289,7 @@ async def premium_pump_scanner(app: Application):
                 log.info(f"Found {len(pairs)} pairs")
 
                 for p in pairs:
-                    # FILTER: pump.fun tokens ONLY
+                    # CORRECT: dexId is "pumpfun" (no dot)
                     if p.get("dexId") != "pumpfun":
                         continue
 
@@ -366,7 +366,6 @@ async def premium_pump_scanner(app: Application):
             except Exception as e:
                 log.exception(f"Scanner crashed: {e}")
                 await asyncio.sleep(20)
-
 # --------------------------------------------------------------------------- #
 #                               REFERRAL & PAY
 # --------------------------------------------------------------------------- #
