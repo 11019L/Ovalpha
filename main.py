@@ -299,7 +299,7 @@ async def premium_pump_scanner(app: Application):
             try:
                 await asyncio.sleep(random.uniform(12, 22))
                 headers = {"accept": "application/json", "X-API-Key": MORALIS_API_KEY}
-                    log.info(f"Moralis request with key: {MORALIS_API_KEY[:8]}...")
+                log.info(f"Moralis request with key: {MORALIS_API_KEY[:8]}...")
                 async with sess.get(f"{MORALIS_URL}?limit=50", headers=headers, timeout=15) as r:
                     if r.status != 200:
                         log.error(f"Moralis error {r.status}")
