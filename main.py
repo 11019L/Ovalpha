@@ -107,12 +107,6 @@ token_state = data["token_state"]
 data["revenue"] = data.get("revenue", 0.0)
 save_lock = asyncio.Lock()
 
-# 5 MINUTE SEEN CACHE — NO CLEAR, NO OLD DATA
-now = time.time()
-seen = {k: v for k, v in seen.items() if now - v < 300}  # 5 mins only
-
-# TEMP: LOG SEEN SIZE FOR DEBUG
-log.info(f"SEEN CACHE: {len(seen)} tokens (will ignore for 5 mins)")
 
 def save_data(data):
     try:
