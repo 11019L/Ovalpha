@@ -284,9 +284,8 @@ async def premium_pump_scanner(app: Application):
 
                 log.info(f"Found {len(pairs)} pump.fun pairs")
 
-                # === FIXED INDENTATION: for loop starts here ===
+                # === FILTER: Raydium + pumpdotfun + pump/fun in symbol ===
                 for p in pairs:
-                    # Filter: Only Raydium or pumpdotfun DEX
                     if p.get("dexId") not in ["raydium", "pumpdotfun"]:
                         continue
                     base = p.get("baseToken")
@@ -311,11 +310,12 @@ async def premium_pump_scanner(app: Application):
                 log.info(f"Processing {len(tokens)} NEW tokens")
                 log.info(f"DEBUG: Seen cache size: {len(seen)} | Total pairs: {len(pairs)}")
                 if len(seen) > 0:
-                log.info(f"SEEN MINTS: {list(seen.keys())[:3]}...")
+                    log.info(f"SEEN MINTS: {list(seen.keys())[:3]}...")
+
                 processed = 0
                 for t in tokens:
                     mint = t["mint"]
-                    seen[mint] = time.time()
+                    seen[mint] = time.time()  # Add to seen
 
                     sym = t["symbol"]
                     fdv = t["fdv"]
