@@ -289,26 +289,27 @@ async def premium_pump_scanner(app: Application):
                 log.info(f"Found {len(pairs)} pairs")
 
                 for p in pairs:
-                    # CORRECT: dexId is "pumpfun" (no dot)
-                    if p.get("dexId") != "pumpfun":
-                        continue
-
-                    base = p.get("baseToken")
-                    if not base:
-                        continue
-
-                    mint = base["address"]
-                    if mint in seen:
-                        continue
-
-                    tokens.append({
-                        "mint": mint,
-                        "symbol": base["symbol"][:20],
-                        "fdv": float(p.get("fdv", 0) or 0),
-                        "liq": float(p.get("liquidity", {}).get("usd", 0) or 0),
-                        "vol5": float(p.get("volume", {}).get("m5", 0) or 0),
-                    })
-
+    # CORRECT: pump.fun tokens are on Raydium
+                if p.get("dexId") != "raydium":
+                    continue
+                if "pump.fun" not in p.get("url", ""):
+                    continue
+            
+                base = p.get("baseToken")
+                if not base:
+                    continue
+            
+                mint = base["address"]
+                if mint in seen:
+                    continue
+            
+                tokens.append({
+                    "mint": mint,
+                    "symbol": base["symbol"][:20],
+                    "fdv": float(p.get("fdv", 0) or 0),
+                    "liq": float(p.get("liquidity", {}).get("usd", 0) or 0),
+                    "vol5": float(p.get("volume", {}).get("m5", 0) or 0),
+                })
                 log.info(f"Processing {len(tokens)} NEW tokens")
                 log.info(f"DEBUG: Seen cache size: {len(seen)} | Total pairs: {len(pairs)}")
                 if len(seen) > 0:
