@@ -297,9 +297,12 @@ async def premium_pump_scanner(app: Application):
                     seen[mint] = time.time()
 
                     sym = token.get("symbol", "UNKNOWN")[:20]
-                    fdv = token.get("fullyDilutedValuation", 0)
-                    liq = token.get("liquidity", 0)
-                    vol = token.get("volume24h", 0) / 4.8  # Approximate 5m from 24h
+                    fdv_raw = token.get("fullyDilutedValuation", 0)
+                    fdv = float(fdv_raw) if fdv_raw else 0.0
+                    liq_raw = token.get("liquidity", 0)
+                    liq = float(liq_raw) if liq_raw else 0.0
+                    vol_raw = token.get("volume24h", 0)
+                    vol = float(vol_raw) / 4.8 if vol_raw else 0.0  # Approximate 5m from 24h
 
                     log.info(f"CHECK {sym} | FDV ${fdv:,.0f} | Vol ${vol:,.0f} | Liq ${liq:,.0f}")
 
