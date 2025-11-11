@@ -257,98 +257,119 @@ async def detect_large_buy(mint: str, sess) -> float:
 # --------------------------------------------------------------------------- #
 #                               SCANNER (DEXSCREENER ONLY)
 # --------------------------------------------------------------------------- #
-import websockets
-
 async def premium_pump_scanner(app: Application):
     volume_hist = defaultdict(lambda: deque(maxlen=4))
-    
-    async def listen_to_pump_stream():
-        uri = BLOXROUTE_WS
+    async with aiohttp.ClientSession() as sess:
         while True:
             try:
-                async with websockets.connect(uri) as ws:
-                    # Subscribe to new tokens
-                    subscribe_msg = {
-                        "jsonrpc": "2.0",
-                        "id": 1,
-                        "method": "subscribe",
-                        "params": ["GetPumpFunNewTokensStream", {}]
-                    }
-                    await ws.send(json.dumps(subscribe_msg))
-                    log.info("Subscribed to bloXroute Pump.fun stream — waiting for new tokens...")
+                await asyncio.sleep(random.uniform(10, 20))  # 10-20s scans
+                tokens = []
 
-                    async for message in ws:
-                        data = json.loads(message)
-                        if "result" in data and "subscription" in data:
-                            continue
-                        
-                        # New token data
-                        token = data.get("result", {})
-                        mint = token.get("mint")
-                        if not mint or mint in seen:
-                            continue
+                # MORALIS PUMP.FUN NEW TOKENS ENDPOINT
+                MORALIS_API = "https://deep-index.moralis.io/api/v2.2/erc20/{chain}/new?limit=50"
+                chain = "solana"
+                headers = {"x-api-key": os.getenv("MORALIS_API_KEY")}
+                if not headers["x-api-key"]:
+                    log.error("MORALIS_API_KEY missing in .env — get free key from moralis.com")
+                    await asyncio.sleep(60)
+                    continue
 
-                        seen[mint] = time.time()
-                        log.info(f"NEW PUMP.FUN: {token.get('name', 'UNKNOWN')} ({token.get('symbol', '?')}) | CA: {mint[:8]}...")
+                log.info("Fetching NEW pump.fun tokens from Moralis API...")
+                async with sess.get(
+                    MORALIS_API.format(chain=chain),
+                    headers=headers,
+                    timeout=15
+                ) as r:
+                    if r.status != 200:
+                        log.error(f"Moralis API error: {r.status}")
+                        await asyncio.sleep(30)
+                        continue
 
-                        # Get price data from DexScreener
-                        async with aiohttp.ClientSession() as sess:
-                            async with sess.get(f"{DEXSCREENER_TOKEN}/{mint}", timeout=10) as r:
-                                if r.status == 200:
-                                    ds_data = await r.json()
-                                    pairs = ds_data.get("pairs", [])
-                                    pair = next((p for p in pairs if p["quoteToken"]["symbol"] == "SOL"), None)
-                                    if pair:
-                                        liq = pair.get("liquidity", {}).get("usd", 0)
-                                        fdv = pair.get("fdv", 0)
-                                        vol = pair.get("volume", {}).get("m5", 0)
-                                    else:
-                                        liq, fdv, vol = 0, 0, 0
-                                else:
-                                    liq, fdv, vol = 0, 0, 0
+                    data = await r.json()
+                    new_tokens = data.get("result", [])[:50]  # Newest 50 tokens
 
-                        sym = token.get("symbol", "UNKNOWN")[:20]
-                        safe, reason = await is_rug_proof(mint, sess)
-                        log.info(f"  → RUG: {'PASS' if safe else 'FAIL'} | {reason}")
-                        if not safe:
-                            continue
+                log.info(f"Found {len(new_tokens)} NEW pump.fun tokens")
 
-                        whale = await detect_large_buy(mint, sess)
-                        if whale >= MIN_WHALE_USD:
-                            extra = f"**\\${whale:,.0f} WHALE BUY**\\n"
-                            msg = format_alert(sym, mint, liq, fdv, vol, "whale", extra)
-                            kb = [[InlineKeyboardButton("BUY NOW", callback_data=f"askbuy_{mint}")]]
-                            await broadcast(msg, InlineKeyboardMarkup(kb))
-                            continue
+                for token in new_tokens:
+                    mint = token.get("token_address")
+                    if not mint or mint in seen:
+                        continue
 
-                        hist = volume_hist[mint]
-                        hist.append(vol)
-                        spike = len(hist) > 1 and vol >= (sum(hist[:-1]) / len(hist[:-1])) * 2.2
+                    # Get price data from Moralis
+                    price_url = f"https://solana-gateway.moralis.io/token/mainnet/{mint}/price"
+                    async with sess.get(price_url, headers=headers, timeout=10) as r2:
+                        if r2.status == 200:
+                            price_data = await r2.json()
+                            liq = price_data.get("liquidity", 0)
+                            fdv = price_data.get("market_cap", 0)
+                            vol = price_data.get("volume_24h", 0)
+                        else:
+                            liq, fdv, vol = 0, 0, 0
 
-                        level = None
-                        if fdv >= MIN_FDVS_SNIPE and vol <= MAX_VOL_SNIPE:
-                            level = "snipe"
-                        elif fdv >= MIN_FDVS_CONFIRM and vol >= MIN_VOL_CONFIRM:
-                            level = "confirm"
-                        elif spike and vol >= MIN_VOL_PUMP:
-                            level = "pump"
+                    tokens.append({
+                        "mint": mint,
+                        "symbol": token.get("symbol", "UNKNOWN")[:20],
+                        "fdv": float(fdv),
+                        "liq": float(liq),
+                        "vol5": float(vol) / 4.8,  # Approximate 5m from 24h
+                    })
 
-                        if level:
-                            state = token_state.setdefault(mint, {"sent": set()})
-                            if level not in state["sent"]:
-                                state["sent"].add(level)
-                                token_state[mint] = state
-                                kb = [[InlineKeyboardButton("BUY NOW", callback_data=f"askbuy_{mint}")]] if level == "snipe" else None
-                                msg = format_alert(sym, mint, liq, fdv, vol, level)
-                                await broadcast(msg, InlineKeyboardMarkup(kb) if kb else None)
+                log.info(f"Processing {len(tokens)} NEW tokens")
+                log.info(f"DEBUG: Seen cache size: {len(seen)}")
+
+                processed = 0
+                for t in tokens:
+                    mint = t["mint"]
+                    seen[mint] = time.time()
+
+                    sym = t["symbol"]
+                    fdv = t["fdv"]
+                    liq = t["liq"]
+                    vol = t["vol5"]
+
+                    log.info(f"CHECK {sym} | FDV ${fdv:,.0f} | Vol ${vol:,.0f} | Liq ${liq:,.0f}")
+
+                    safe, reason = await is_rug_proof(mint, sess)
+                    log.info(f"  → RUG: {'PASS' if safe else 'FAIL'} | {reason}")
+                    if not safe:
+                        continue
+
+                    whale = await detect_large_buy(mint, sess)
+                    if whale >= MIN_WHALE_USD:
+                        extra = f"**\\${whale:,.0f} WHALE BUY**\\n"
+                        msg = format_alert(sym, mint, liq, fdv, vol, "whale", extra)
+                        kb = [[InlineKeyboardButton("BUY NOW", callback_data=f"askbuy_{mint}")]]
+                        await broadcast(msg, InlineKeyboardMarkup(kb))
+                        processed += 1
+                        continue
+
+                    hist = volume_hist[mint]
+                    hist.append(vol)
+                    spike = len(hist) > 1 and vol >= (sum(hist[:-1]) / len(hist[:-1])) * 2.2
+
+                    level = None
+                    if fdv >= MIN_FDVS_SNIPE and vol <= MAX_VOL_SNIPE:
+                        level = "snipe"
+                    elif fdv >= MIN_FDVS_CONFIRM and vol >= MIN_VOL_CONFIRM:
+                        level = "confirm"
+                    elif spike and vol >= MIN_VOL_PUMP:
+                        level = "pump"
+
+                    if level:
+                        state = token_state.setdefault(mint, {"sent": set()})
+                        if level not in state["sent"]:
+                            state["sent"].add(level)
+                            token_state[mint] = state
+                            kb = [[InlineKeyboardButton("BUY NOW", callback_data=f"askbuy_{mint}")]] if level == "snipe" else None
+                            msg = format_alert(sym, mint, liq, fdv, vol, level)
+                            await broadcast(msg, InlineKeyboardMarkup(kb) if kb else None)
+                            processed += 1
+
+                log.info(f"Scanner: {processed} alerts sent")
 
             except Exception as e:
-                log.error(f"WebSocket error: {e}. Reconnecting in 10s...")
-                await asyncio.sleep(10)
-
-    # Start the stream
-    asyncio.create_task(listen_to_pump_stream())
-    await asyncio.Event().wait()
+                log.exception(f"Scanner crashed: {e}")
+                await asyncio.sleep(20)
 # --------------------------------------------------------------------------- #
 #                               REFERRAL & PAY
 # --------------------------------------------------------------------------- #
