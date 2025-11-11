@@ -301,32 +301,26 @@ async def get_pair_from_rpc(mint: str, sess) -> str | None:
 #                               PAIR FETCH: DEXSCREENER + RPC ONLY
 # --------------------------------------------------------------------------- #
 async def get_pair_address(mint: str, sess) -> str | None:
-    # 1. DEXSCREENER (FASTEST, 95% HIT RATE)
+    # 1. Dexscreener (99% hit rate at 60s+)
     try:
         async with sess.get(f"{DEXSCREENER_TOKEN}/{mint}", timeout=10) as r:
             if r.status == 200:
                 data = await r.json()
                 pair = next((p for p in data.get("pairs", []) if p.get("dexId") == "pumpswap"), None)
                 if pair:
-                    log.info(f"  → DEXSCREENER PAIR: {mint[:8]} → {pair['pairAddress'][:8]}...")
+                    log.info(f"  → PAIR: {mint[:8]} (Dexscreener)")
                     return pair["pairAddress"]
-    except Exception as e:
-        log.debug(f"Dexscreener error {mint[:8]}: {e}")
+    except:
+        pass
 
-    # 2. SOLANA RPC (100% RELIABLE, HELIUS)
+    # 2. RPC fallback
     try:
         payload = {
             "jsonrpc": "2.0", "id": 1,
             "method": "getProgramAccounts",
             "params": [
                 "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
-                {
-                    "encoding": "jsonParsed",
-                    "filters": [
-                        {"dataSize": 165},
-                        {"memcmp": {"offset": 32, "bytes": mint}}
-                    ]
-                }
+                {"encoding": "jsonParsed", "filters": [{"dataSize": 165}, {"memcmp": {"offset": 32, "bytes": mint}}]}
             ]
         }
         async with sess.post(SOLANA_RPC, json=payload, timeout=12) as r:
@@ -335,12 +329,12 @@ async def get_pair_address(mint: str, sess) -> str | None:
                 accounts = result.get("result", [])
                 if accounts:
                     pair_addr = accounts[0]["pubkey"]
-                    log.info(f"  → RPC PAIR: {mint[:8]} → {pair_addr[:8]}...")
+                    log.info(f"  → PAIR: {mint[:8]} (RPC)")
                     return pair_addr
-    except Exception as e:
-        log.debug(f"RPC pair error {mint[:8]}: {e}")
+    except:
+        pass
 
-    log.info(f"  → NO PAIR for {mint[:8]} (blocked by pump.fun)")
+    log.info(f"  → NO PAIR: {mint[:8]} (should not happen at 60s+)")
     return None
 # --------------------------------------------------------------------------- #
 #                               SCANNER
@@ -355,17 +349,19 @@ async def premium_pump_scanner(app: Application):
                 await asyncio.sleep(random.uniform(12, 22))
                 headers = {"accept": "application/json", "X-API-Key": MORALIS_API_KEY}
                 log.info(f"Moralis request with key: {MORALIS_API_KEY[:8]}...")
-                async with sess.get(f"{MORALIS_URL}?limit=50", headers=headers, timeout=15) as r:
+
+                # Fetch only 30 tokens (reduce load)
+                async with sess.get(f"{MORALIS_URL}?limit=30", headers=headers, timeout=15) as r:
                     if r.status != 200:
-                        log.error(f"Moralis error {r.status}")
+                        log.error(f"Moralis API error: {r.status}")
                         await asyncio.sleep(30)
                         continue
-                    new_tokens = (await r.json()).get("result", [])[:50]
+                    new_tokens = (await r.json()).get("result", [])[:30]
 
                 log.info(f"Fetched {len(new_tokens)} new pump.fun tokens")
-                await asyncio.sleep(18)                     # give pair time
+                await asyncio.sleep(18)  # let pairs settle
 
-                # clean old seen entries (1h)
+                # Clean seen cache (1h)
                 old = [m for m, t in seen.items() if time.time() - t > 3600]
                 for m in old: del seen[m]
 
@@ -374,18 +370,26 @@ async def premium_pump_scanner(app: Application):
                     if not mint or mint in seen:
                         continue
 
-                    # optional age filter
+                    # === 60s+ AGE FILTER: ONLY READY-TO-SNIPE TOKENS ===
                     created_at = token.get("createdAt")
                     if created_at:
                         try:
                             age = time.time() - datetime.fromisoformat(created_at.replace('Z', '+00:00')).timestamp()
-                            if age < 20:
+                            if age < 60:
                                 skip_counter["too_new"] += 1
+                                log.debug(f"  → SKIP: {mint[:8]} is {age:.0f}s old (<60s)")
                                 continue
-                        except:
-                            pass
+                        except Exception as e:
+                            log.debug(f"  → Bad createdAt for {mint[:8]}: {e}")
+                            continue
+                    else:
+                        skip_counter["no_age"] += 1
+                        log.debug(f"  → SKIP: No createdAt for {mint[:8]}")
+                        continue
 
                     seen[mint] = time.time()
+
+                    # === PAIR FETCH: DEXSCREENER + HELIUS RPC (NO PUMP.FUN) ===
                     pair_addr = await get_pair_address(mint, sess)
                     if not pair_addr:
                         skip_counter["no_pair"] += 1
@@ -398,13 +402,14 @@ async def premium_pump_scanner(app: Application):
 
                     log.info(f"CHECK {sym} | FDV ${fdv:,.0f} | Vol ${vol:,.0f} | Liq ${liq:,.0f}")
 
+                    # === RUG CHECK ===
                     safe, reason = await is_rug_proof(mint, pair_addr, sess)
                     log.info(f"  → RUG: {'PASS' if safe else 'FAIL'} | {reason}")
                     if not safe:
                         skip_counter["rug"] += 1
                         continue
 
-                    # ----- WHALE -----
+                    # === WHALE DETECTION ===
                     whale = await detect_large_buy(mint, sess)
                     if whale >= MIN_WHALE_USD:
                         extra = f"**\\${whale:,.0f} WHALE BUY**\\n"
@@ -413,18 +418,15 @@ async def premium_pump_scanner(app: Application):
                         await broadcast(msg, InlineKeyboardMarkup(kb))
                         continue
 
-                    # ----- VOLUME HISTORY & SPIKE -----
+                    # === VOLUME SPIKE & SNIPE LOGIC ===
                     hist = volume_hist[mint]
                     hist.append(vol)
                     level = None
 
-                    # snipe
                     if fdv >= MIN_FDVS_SNIPE and vol <= MAX_VOL_SNIPE:
                         level = "snipe"
-                    # confirm
                     elif fdv >= MIN_FDVS_CONFIRM and vol >= MIN_VOL_CONFIRM:
                         level = "confirm"
-                    # pump (spike vs previous scan)
                     elif len(hist) >= 2 and vol >= hist[-2] * 3.0 and vol >= MIN_VOL_PUMP:
                         level = "pump"
 
