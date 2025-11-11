@@ -57,6 +57,7 @@ PUMPFUN_TOKENS = "https://frontend-api.pump.fun/tokens?offset=0&limit=50&sort=cr
 BLOXROUTE_WS = "wss://pump-ny.solana.dex.blxrbdn.com/ws"
 MORALIS_URL = "https://solana-gateway.moralis.io/token/mainnet/exchange/pumpfun/new"
 PUMPFUN_TOKEN_DETAIL = "https://frontend-api.pump.fun/tokens/{}"
+PUMPPORTAL_TOKEN = "https://pumpportal.fun/api/data/token-info?address={}"
 
 # Thresholds
 MIN_LIQUIDITY = 75
@@ -174,15 +175,17 @@ def get_referral_link(uid: int) -> str:
 # --------------------------------------------------------------------------- #
 async def is_rug_proof(mint: str, sess) -> tuple[bool, str]:
     try:
-        # === 1. GET TOKEN DETAILS FROM PUMP.FUN (INCLUDES pairAddress) ===
-        async with sess.get(PUMPFUN_TOKEN_DETAIL.format(mint), timeout=10) as r:
+        # === 1. GET TOKEN INFO FROM PUMPPORTAL (INCLUDES PAIR) ===
+        async with sess.get(PUMPPORTAL_TOKEN.format(mint), timeout=10) as r:
             if r.status != 200:
                 return False, "No token data"
-            token_data = await r.json()
-            pair_addr = token_data.get("pair")
+            data = await r.json()
+            if not data.get("success"):
+                return False, "Invalid token"
+            pair_addr = data.get("pair")
             if not pair_addr:
-                return False, "No pairAddress"
-            log.debug(f"Pump.fun pair for {mint[:8]}: {pair_addr}")
+                return False, "No pair"
+            log.debug(f"PumpPortal pair for {mint[:8]}: {pair_addr}")
 
         # === 2. MINT FROZEN? ===
         for attempt in range(3):
@@ -190,10 +193,7 @@ async def is_rug_proof(mint: str, sess) -> tuple[bool, str]:
                 payload = {"jsonrpc": "2.0", "id": 1, "method": "getAccountInfo", "params": [mint, {"encoding": "jsonParsed"}]}
                 async with sess.post(SOLANA_RPC, json=payload, timeout=8) as r:
                     if r.status != 200: continue
-                    data = await r.json()
-                    value = data.get("result", {}).get("value")
-                    if not value: return False, "Invalid mint"
-                    info = value["data"]["parsed"]["info"]
+                    info = (await r.json()).get("result", {}).get("value", {}).get("data", {}).get("parsed", {}).get("info", {})
                     if info.get("mintAuthority"): return False, "Mint not frozen"
                     break
             except: pass
@@ -205,8 +205,7 @@ async def is_rug_proof(mint: str, sess) -> tuple[bool, str]:
                 payload = {"jsonrpc": "2.0", "id": 1, "method": "getTokenLargestAccounts", "params": [pair_addr]}
                 async with sess.post(SOLANA_RPC, json=payload, timeout=8) as r:
                     if r.status != 200: continue
-                    data = await r.json()
-                    top = data.get("result", {}).get("value", [{}])[0]
+                    top = (await r.json()).get("result", {}).get("value", [{}])[0]
                     if top.get("address") != "dead111111111111111111111111111111111111111":
                         return False, "LP not burned"
                     break
@@ -219,16 +218,13 @@ async def is_rug_proof(mint: str, sess) -> tuple[bool, str]:
                 payload = {"jsonrpc": "2.0", "id": 1, "method": "getTokenSupply", "params": [mint]}
                 async with sess.post(SOLANA_RPC, json=payload, timeout=8) as r:
                     if r.status != 200: continue
-                    data = await r.json()
-                    total = float(data.get("result", {}).get("value", {}).get("uiAmount", 0) or 0)
+                    total = float((await r.json()).get("result", {}).get("value", {}).get("uiAmount", 0) or 0)
                     if total == 0: return False, "No supply"
 
                 payload = {"jsonrpc": "2.0", "id": 1, "method": "getTokenLargestAccounts", "params": [mint]}
                 async with sess.post(SOLANA_RPC, json=payload, timeout=8) as r:
                     if r.status != 200: continue
-                    data = await r.json()
-                    top = data.get("result", {}).get("value", [{}])[0]
-                    held = float(top.get("uiAmount", 0) or 0)
+                    held = float((await r.json()).get("result", {}).get("value", [{}])[0].get("uiAmount", 0) or 0)
                     if total > 0 and (held / total) > 0.10:
                         return False, f"Dev holds {(held/total)*100:.1f}%"
                     break
@@ -312,28 +308,32 @@ async def premium_pump_scanner(app: Application):
 
                 log.info(f"Found {len(new_tokens)} NEW pump.fun tokens")
 
-                for token in new_tokens:
+                    for token in new_tokens:
                     mint = token.get("tokenAddress")
                     if not mint or mint in seen:
                         continue
 
                     seen[mint] = time.time()
 
-                    sym = token.get("symbol", "UNKNOWN")[:20]
-                    fdv_raw = token.get("fullyDilutedValuation", 0)
-                    fdv = float(fdv_raw) if fdv_raw else 0.0
-                    liq_raw = token.get("liquidity", 0)
-                    liq = float(liq_raw) if liq_raw else 0.0
-                    vol_raw = token.get("volume24h", 0)
-                    vol = float(vol_raw) / 4.8 if vol_raw else 0.0
+                    # GET FULL DATA FROM PUMPPORTAL
+                    async with sess.get(PUMPPORTAL_TOKEN.format(mint), timeout=10) as r:
+                        if r.status != 200: continue
+                        data = await r.json()
+                        if not data.get("success"): continue
+
+                    sym = data.get("symbol", "UNKNOWN")[:20]
+                    fdv = float(data.get("fdv", 0) or 0)
+                    liq = float(data.get("liquidity", 0) or 0)
+                    vol = float(data.get("volume", {}).get("5m", 0) or 0)
 
                     log.info(f"CHECK {sym} | FDV ${fdv:,.0f} | Vol ${vol:,.0f} | Liq ${liq:,.0f}")
 
-                    # RUG CHECK USING PUMP.FUN API (GETS pairAddress)
                     safe, reason = await is_rug_proof(mint, sess)
                     log.info(f"  → RUG: {'PASS' if safe else 'FAIL'} | {reason}")
                     if not safe:
                         continue
+
+                    # ... rest of logic (whale, snipe, etc)
 
                     # WHALE DETECTION
                     whale = await detect_large_buy(mint, sess)
