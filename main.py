@@ -171,129 +171,62 @@ def get_referral_link(uid: int) -> str:
 # --------------------------------------------------------------------------- #
 #                               RUG CHECK
 # --------------------------------------------------------------------------- #
-async def is_rug_proof(mint: str, sess) -> tuple[bool, str]:
-    """
-    FULLY WORKING RUG CHECK FOR PUMP.FUN
-    - Uses Helius RPC (fast)
-    - Uses DexScreener + pump.fun URL filter
-    - 3 retries + timeout
-    - DEBUG LOGS ADDED
-    """
+async def is_rug_proof(mint: str, sess, pair_addr: str) -> tuple[bool, str]:
     try:
         # === 1. MINT FROZEN? ===
         for attempt in range(3):
             try:
-                payload = {
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "getAccountInfo",
-                    "params": [mint, {"encoding": "jsonParsed"}]
-                }
+                payload = {"jsonrpc": "2.0", "id": 1, "method": "getAccountInfo", "params": [mint, {"encoding": "jsonParsed"}]}
                 async with sess.post(SOLANA_RPC, json=payload, timeout=8) as r:
-                    if r.status == 429:
-                        await asyncio.sleep(2)
-                        continue
-                    if r.status != 200:
-                        return False, f"RPC error {r.status}"
+                    if r.status != 200: continue
                     data = await r.json()
                     value = data.get("result", {}).get("value")
-                    if not value:
-                        return False, "Invalid mint"
+                    if not value: return False, "Invalid mint"
                     info = value["data"]["parsed"]["info"]
-                    if info.get("mintAuthority"):
-                        return False, "Mint not frozen"
+                    if info.get("mintAuthority"): return False, "Mint not frozen"
                     break
-            except asyncio.TimeoutError:
-                if attempt == 2:
-                    return False, "RPC timeout"
-                await asyncio.sleep(1)
-        else:
-            return False, "RPC failed"
+            except: pass
+        else: return False, "RPC failed"
 
-        # === 2. GET PUMP.FUN PAIR FROM DEXSCREENER (USING URL) ===
-        async with sess.get(f"{DEXSCREENER_TOKEN}/{mint}", timeout=10) as r:
-            if r.status != 200:
-                return False, "No pair data"
-            data = await r.json()
-            pairs = data.get("pairs", [])
-            
-            # DEBUG: SHOW ALL PAIRS
-            log.debug(f"DexScreener response for {mint[:8]}: {len(pairs)} pairs found")
-            for p in pairs:
-                log.debug(f"  - dexId: {p.get('dexId')}, url: {p.get('url', '')[:60]}...")
-
-            # FILTER BY pump.fun IN URL (NOT dexId)
-            pair = next(
-                (p for p in pairs if "pump.fun" in p.get("url", "")),
-                None
-            )
-            if not pair:
-                return False, "No pump.fun pair"
-            pair_addr = pair["pairAddress"]
-            log.debug(f"Selected pump.fun pair: {pair_addr}")
-
-        # === 3. LP BURNED? ===
+        # === 2. LP BURNED? (USE pair_addr FROM MORALIS) ===
         for attempt in range(3):
             try:
-                payload = {
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "getTokenLargestAccounts",
-                    "params": [pair_addr]
-                }
+                payload = {"jsonrpc": "2.0", "id": 1, "method": "getTokenLargestAccounts", "params": [pair_addr]}
                 async with sess.post(SOLANA_RPC, json=payload, timeout=8) as r:
-                    if r.status == 429:
-                        await asyncio.sleep(2)
-                        continue
-                    if r.status != 200:
-                        return False, f"RPC error {r.status}"
+                    if r.status != 200: continue
                     data = await r.json()
                     top = data.get("result", {}).get("value", [{}])[0]
                     if top.get("address") != "dead111111111111111111111111111111111111111":
                         return False, "LP not burned"
                     break
-            except asyncio.TimeoutError:
-                if attempt == 2:
-                    return False, "RPC timeout"
-                await asyncio.sleep(1)
-        else:
-            return False, "RPC failed"
+            except: pass
+        else: return False, "RPC failed"
 
-        # === 4. DEV HOLDINGS < 10% ===
+        # === 3. DEV HOLDINGS < 10% ===
         for attempt in range(3):
             try:
-                # Total supply
                 payload = {"jsonrpc": "2.0", "id": 1, "method": "getTokenSupply", "params": [mint]}
                 async with sess.post(SOLANA_RPC, json=payload, timeout=8) as r:
-                    if r.status != 200:
-                        return False, f"RPC error {r.status}"
+                    if r.status != 200: continue
                     data = await r.json()
                     total = float(data.get("result", {}).get("value", {}).get("uiAmount", 0) or 0)
-                    if total == 0:
-                        return False, "No supply"
+                    if total == 0: return False, "No supply"
 
-                # Largest holder
                 payload = {"jsonrpc": "2.0", "id": 1, "method": "getTokenLargestAccounts", "params": [mint]}
                 async with sess.post(SOLANA_RPC, json=payload, timeout=8) as r:
-                    if r.status != 200:
-                        return False, f"RPC error {r.status}"
+                    if r.status != 200: continue
                     data = await r.json()
                     top = data.get("result", {}).get("value", [{}])[0]
                     held = float(top.get("uiAmount", 0) or 0)
                     if total > 0 and (held / total) > 0.10:
                         return False, f"Dev holds {(held/total)*100:.1f}%"
                     break
-            except asyncio.TimeoutError:
-                if attempt == 2:
-                    return False, "RPC timeout"
-                await asyncio.sleep(1)
-        else:
-            return False, "RPC failed"
+            except: pass
+        else: return False, "RPC failed"
 
         return True, "SAFE"
-
     except Exception as e:
-        log.debug(f"Rug check crashed {mint[:8]}: {e}")
+        log.debug(f"Rug check error {mint[:8]}: {e}")
         return False, "Check error"
 
 # --------------------------------------------------------------------------- #
@@ -388,10 +321,12 @@ async def premium_pump_scanner(app: Application):
 
                     log.info(f"CHECK {sym} | FDV ${fdv:,.0f} | Vol ${vol:,.0f} | Liq ${liq:,.0f}")
 
-                    safe, reason = await is_rug_proof(mint, sess)
-                    log.info(f"  → RUG: {'PASS' if safe else 'FAIL'} | {reason}")
-                    if not safe:
+                    pair_addr = token.get("pairAddress")
+                    if not pair_addr:
+                        log.info(f"  → RUG: SKIP | No pairAddress in Moralis")
                         continue
+
+                    safe, reason = await is_rug_proof(mint, sess, pair_addr)
 
                     whale = await detect_large_buy(mint, sess)
                     if whale >= MIN_WHALE_USD:
