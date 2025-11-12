@@ -404,7 +404,7 @@ async def premium_pump_scanner(app: Application):
             try:
                 await asyncio.sleep(random.uniform(15, 25))
 
-                                # === RPC SCAN: NEW PUMP.FUN PAIRS (BYPASS DEXSCREENER) ===
+                # === RPC SCAN: NEW PUMP.FUN PAIRS (BYPASS DEXSCREENER) ===
                 log.info("RPC SCAN: fetching new pump.fun pairs")
                 pairs = await get_new_pump_pairs(sess)
                 if not pairs:
@@ -428,26 +428,21 @@ async def premium_pump_scanner(app: Application):
                                     continue
                                 await process_token(pair, sess, volume_hist, token_state)
 
-                                # === CLEAN SEEN CACHE (1h) ===
-                now = time.time()  # ← ADD THIS LINE
+                # === CLEAN SEEN CACHE (1h) ===
+                now = time.time()
                 old = [m for m, t in seen.items() if now - t > 3600]
                 for m in old: del seen[m]
 
                 # === PROCESS NEW PAIRS (ADD TO QUEUE) ===
                 for pair in pairs:
                     try:
-                        base_token = pair.get("baseToken") or {}
-                        mint = base_token.get("address")
-                        if not mint:
+                        mint = pair["baseToken"]["address"]
+                        if not mint or mint in seen:
                             continue
 
-                        # === FIRST TIME SEEN → ADD TO QUEUE ===
-                        if mint not in seen:
-                            seen[mint] = time.time()
-                            ready_queue.append(mint)
-                            log.debug(f"  → ADDED TO QUEUE: {mint[:8]} (will process in 180s)")
-                            continue
-
+                        seen[mint] = time.time()
+                        ready_queue.append(mint)
+                        log.info(f"  → ADDED TO QUEUE: {mint[:8]} (will process in 180s)")
                     except Exception as e:
                         log.debug(f"Queue add error: {e}")
                         continue
@@ -456,53 +451,26 @@ async def premium_pump_scanner(app: Application):
                 for mint in list(ready_queue):
                     if time.time() - seen[mint] < 180:
                         age = int(time.time() - seen[mint])
-                        log.debug(f"  → SKIP: {mint[:8]} waiting 180s (age: {age}s)")
+                        log.info(f"  → SKIP: {mint[:8]} waiting 180s (age: {age}s)")
                         continue
 
                     age = int(time.time() - seen[mint])
                     log.info(f"  → 180s REACHED: {mint[:8]} (age: {age}s) → PROCESSING FROM QUEUE")
-                    ready_queue.remove(mint)  # ← REMOVE NOW
 
-                    # Fetch fresh data
+                    # === FETCH DATA FROM DEXSCREENER (FALLBACK TO RAYDIUM IF NEEDED) ===
                     async with sess.get(f"https://api.dexscreener.com/latest/dex/token/{mint}", timeout=10) as r:
                         if r.status != 200:
-                            log.warning(f"404 → REMOVING DEAD TOKEN {mint[:8]} FROM SEEN")
+                            log.warning(f"404 → REMOVING DEAD TOKEN {mint[:8]} FROM SEEN AND QUEUE")
                             if mint in seen: del seen[mint]
+                            if mint in ready_queue: ready_queue.remove(mint)
                             continue
 
                         data = await r.json()
-                                                # Use RPC pair address from queue
-                        pair_addr = next((p["pairAddress"] for p in pairs if p["baseToken"]["address"] == mint), None)
-                        if not pair_addr:
-                            log.warning(f"NO PAIR ADDR FOR {mint[:8]}")
-                            if mint in seen: del seen[mint]
-                            continue
-
-                        # Fetch live data from Raydium or fallback
-                        async with sess.get(f"https://api.raydium.io/v2/sdk/liquidity/mainnet.json", timeout=10) as r:
-                            if r.status != 200:
-                                log.warning(f"RAYDIUM API DOWN")
-                                if mint in seen: del seen[mint]
-                                continue
-                            ray_data = await r.json()
-                            pool = next((p for p in ray_data.get("official", []) + ray_data.get("unOfficial", []) if p.get("id") == pair_addr), None)
-                            if not pool:
-                                log.warning(f"NO RAYDIUM POOL FOR {mint[:8]}")
-                                if mint in seen: del seen[mint]
-                                continue
-
-                            fdv = float(pool.get("marketCap", 0) or 0)
-                            liq = float(pool.get("liquidity", 0) or 0)
-                            vol_5m = float(pool.get("volume5m", 0) or 0)
-                            sym = pool.get("baseMint", mint)[:8] + "..."
-
-                            if fdv == 0 or liq == 0:
-                                log.warning(f"BAD RAYDIUM DATA {mint[:8]}")
-                                if mint in seen: del seen[mint]
-                                continue
+                        pair = next((p for p in data.get("pairs", []) if p.get("dexId") == "pumpswap"), None)
                         if not pair:
-                            log.warning(f"NO PAIR → REMOVING DEAD TOKEN {mint[:8]} FROM SEEN")
+                            log.warning(f"NO PUMP.FUN PAIR → REMOVING {mint[:8]} FROM SEEN AND QUEUE")
                             if mint in seen: del seen[mint]
+                            if mint in ready_queue: ready_queue.remove(mint)
                             continue
 
                         try:
@@ -513,8 +481,9 @@ async def premium_pump_scanner(app: Application):
                             pair_addr = pair.get("pairAddress")
 
                             if fdv == 0 or liq == 0 or not pair_addr:
-                                log.warning(f"BAD DATA → REMOVING {mint[:8]}")
+                                log.warning(f"BAD DATA → REMOVING {mint[:8]} FROM SEEN AND QUEUE")
                                 if mint in seen: del seen[mint]
+                                if mint in ready_queue: ready_queue.remove(mint)
                                 continue
 
                             log.info(f"QUEUE PROCESS {sym} | FDV ${fdv:,.0f} | Vol ${vol_5m:,.0f} | Liq ${liq:,.0f}")
@@ -526,6 +495,7 @@ async def premium_pump_scanner(app: Application):
                                 skip_counter["rug"] += 1
                                 log.warning(f"  → RUG FAILED: {mint[:8]} | {reason}")
                                 if mint in seen: del seen[mint]
+                                if mint in ready_queue: ready_queue.remove(mint)
                                 continue
 
                             # === WHALE ===
@@ -535,6 +505,7 @@ async def premium_pump_scanner(app: Application):
                                 msg = format_alert(sym, mint, liq, fdv, vol_5m, "whale", extra)
                                 kb = [[InlineKeyboardButton("BUY NOW", callback_data=f"askbuy_{mint}")]]
                                 await broadcast(msg, InlineKeyboardMarkup(kb))
+                                if mint in ready_queue: ready_queue.remove(mint)
                                 continue
 
                             # === SNIPE LOGIC ===
@@ -557,10 +528,12 @@ async def premium_pump_scanner(app: Application):
                                     kb = [[InlineKeyboardButton("BUY NOW", callback_data=f"askbuy_{mint}")]] if level == "snipe" else None
                                     msg = format_alert(sym, mint, liq, fdv, vol_5m, level)
                                     await broadcast(msg, InlineKeyboardMarkup(kb) if kb else None)
+                                    if mint in ready_queue: ready_queue.remove(mint)
 
                         except Exception as e:
                             log.error(f"PROCESS ERROR {mint[:8]}: {e}")
                             if mint in seen: del seen[mint]
+                            if mint in ready_queue: ready_queue.remove(mint)
                             continue
 
                 log.info(f"Scanner round | Skips: {dict(skip_counter)} | Seen: {len(seen)} | Queue: {len(ready_queue)}")
