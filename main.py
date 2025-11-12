@@ -301,29 +301,58 @@ async def detect_large_buy(mint: str, sess) -> float:
 # --------------------------------------------------------------------------- #
 #                               RPC PAIR DETECTION (BYPASS PUMP.FUN)
 # --------------------------------------------------------------------------- #
-# === RPC SCAN: GET NEW PUMP.FUN PAIRS (BYPASS DEXSCREENER) ===
+# --------------------------------------------------------------------------- #
+#                               RPC PAIR FETCH — NEWEST ONLY
+# --------------------------------------------------------------------------- #
 async def get_new_pump_pairs(sess):
+    """Get only the *newest* pump.fun launches using getSignaturesForAddress"""
+    program_id = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
     payload = {
         "jsonrpc": "2.0", "id": 1,
-        "method": "getProgramAccounts",
-        "params": [
-            "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",  # Pump.fun
-            {
-                "encoding": "jsonParsed",
-                "filters": [{"dataSize": 165}]
-            }
-        ]
+        "method": "getSignaturesForAddress",
+        "params": [program_id, {"limit": 50}]
     }
-    async with sess.post(SOLANA_RPC, json=payload, timeout=15) as r:
-        if r.status != 200: return []
-        accounts = (await r.json()).get("result", [])
-        pairs = []
-        for acc in accounts[:50]:  # latest 50
-            data = acc["account"]["data"]["parsed"]["info"]
-            mint = data["mint"]
-            if mint in seen: continue
-            pairs.append({"baseToken": {"address": mint}})
-        return pairs
+    try:
+        async with sess.post(SOLANA_RPC, json=payload, timeout=15) as r:
+            if r.status != 200:
+                log.warning(f"RPC sig error {r.status}")
+                return []
+            result = await r.json()
+            sigs = result.get("result", [])
+            log.info(f"RPC SIGS: {len(sigs)} recent pump.fun txs")
+
+            pairs = []
+            for sig in sigs:
+                tx_payload = {
+                    "jsonrpc": "2.0", "id": 1,
+                    "method": "getTransaction",
+                    "params": [sig["signature"], {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}]
+                }
+                async with sess.post(SOLANA_RPC, json=tx_payload, timeout=10) as tx_r:
+                    if tx_r.status != 200: continue
+                    tx_data = await tx_r.json()
+                    if not tx_data.get("result"): continue
+
+                    # Look for mint in instructions
+                    instructions = tx_data["result"]["transaction"]["message"]["instructions"]
+                    for instr in instructions:
+                        if instr.get("programId") != program_id: continue
+                        parsed = instr.get("parsed", {})
+                        if parsed.get("type") != "create": continue
+                        info = parsed.get("info", {})
+                        mint = info.get("mint")
+                        if not mint or mint in seen: continue
+
+                        # Fake pair for compatibility
+                        pairs.append({
+                            "baseToken": {"address": mint, "symbol": "NEW"},
+                            "pairAddress": info.get("bondingCurve") or "unknown"
+                        })
+                        break
+            return pairs[:20]  # Only newest 20
+    except Exception as e:
+        log.error(f"RPC new pairs error: {e}")
+        return []
     
 # --------------------------------------------------------------------------- #
 #                               PAIR FETCH: DEXSCREENER + RPC ONLY
