@@ -344,6 +344,9 @@ async def get_pair_from_rpc(mint: str, sess) -> str | None:
 # --------------------------------------------------------------------------- #
 #                               SCANNER
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+#                               SCANNER
+# --------------------------------------------------------------------------- #
 async def premium_pump_scanner(app: Application):
     volume_hist = defaultdict(lambda: deque(maxlen=4))
     skip_counter = defaultdict(int)
@@ -409,8 +412,8 @@ async def premium_pump_scanner(app: Application):
                         log.debug(f"Queue add error: {e}")
                         continue
 
-                                # === PROCESS READY QUEUE (180s+ OLD) ===
-                  for mint in list(ready_queue):
+                # === PROCESS READY QUEUE (180s+ OLD) ===
+                for mint in list(ready_queue):
                     if time.time() - seen[mint] < 180:
                         age = int(time.time() - seen[mint])
                         log.debug(f"  → SKIP: {mint[:8]} waiting 180s (age: {age}s)")
