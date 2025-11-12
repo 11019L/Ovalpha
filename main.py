@@ -326,10 +326,7 @@ async def get_new_pump_pairs(sess):
                 tx_payload = {
                     "jsonrpc": "2.0", "id": 1,
                     "method": "getTransaction",
-                    "params": [
-                        sig["signature"],
-                        {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}
-                    ]
+                    "params": [sig["signature"], {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}]
                 }
                 async with sess.post(SOLANA_RPC, json=tx_payload, timeout=10) as tx_r:
                     if tx_r.status != 200: continue
@@ -337,47 +334,32 @@ async def get_new_pump_pairs(sess):
                     result = tx_data.get("result")
                     if not result: continue
 
-                    # Try parsed first
-                    instructions = result["transaction"]["message"].get("instructions", [])
+                    instructions = result["transaction"]["message"]["instructions"]
                     mint = None
                     pair_addr = None
 
                     for instr in instructions:
-                        # PARSED
-                        if "parsed" in instr:
+                        if "parsed" in instr and instr["parsed"].get("type") == "create":
                             info = instr["parsed"].get("info", {})
-                            if info.get("mint"):
-                                mint = info["mint"]
-                                pair_addr = info.get("bondingCurve")
-                                break
-                        # BASE64 DECODE
-                        elif "data" in instr and "programId" in instr:
-                            if instr["programId"] != program_id: continue
-                            try:
-                                import base64
-                                data_b64 = instr["data"]
-                                data_bytes = base64.b64decode(data_b64)
-                                # First 8 bytes = discriminator for "create"
-                                if data_bytes[:8] == b'\x00\x00\x00\x00\x00\x00\x00\x00':
-                                    # Extract mint from account keys
-                                    accounts = result["transaction"]["message"]["accountKeys"]
-                                    mint = accounts[4]  # mint is 5th account in create
-                                    pair_addr = accounts[1]  # bonding curve
-                                    break
-                            except: continue
+                            mint = info.get("mint")
+                            pair_addr = info.get("bondingCurve")
+                            break
 
-                    if not mint or mint in seen: continue
+                    if not mint or mint in seen:
+                        continue
 
-                    pairs.append({
-                        "baseToken": {"address": mint, "symbol": "NEW"},
+                    # FORCE CORRECT STRUCTURE
+                    pair_obj = {
+                        "baseToken": {"address": mint, "symbol": "PUMP"},
                         "pairAddress": pair_addr or "unknown"
-                    })
-                    seen[mint] = time.time()
-                    log.debug(f"  → NEW LAUNCH: {mint[:8]}")
+                    }
+                    pairs.append(pair_obj)
+                    log.info(f"  → DETECTED LAUNCH: {mint[:8]}")  # ← SEE THIS
 
-            return pairs[:15]
+            log.info(f"FINAL PAIRS: {len(pairs)}")
+            return pairs
     except Exception as e:
-        log.error(f"RPC launch detect error: {e}")
+        log.error(f"RPC ERROR: {e}")
         return []
     
 # --------------------------------------------------------------------------- #
