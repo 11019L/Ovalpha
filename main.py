@@ -301,36 +301,29 @@ async def detect_large_buy(mint: str, sess) -> float:
 # --------------------------------------------------------------------------- #
 #                               RPC PAIR DETECTION (BYPASS PUMP.FUN)
 # --------------------------------------------------------------------------- #
-async def get_pair_from_rpc(mint: str, sess) -> str | None:
-    """Fetch pair address directly from Solana RPC (pump.fun program)"""
+# === RPC SCAN: GET NEW PUMP.FUN PAIRS (BYPASS DEXSCREENER) ===
+async def get_new_pump_pairs(sess):
     payload = {
-        "jsonrpc": "2.0",
-        "id": 1,
+        "jsonrpc": "2.0", "id": 1,
         "method": "getProgramAccounts",
         "params": [
-            "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",  # Pump.fun program ID
+            "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",  # Pump.fun
             {
                 "encoding": "jsonParsed",
-                "filters": [
-                    {"dataSize": 165},
-                    {"memcmp": {"offset": 32, "bytes": mint}}
-                ]
+                "filters": [{"dataSize": 165}]
             }
         ]
     }
-    try:
-        async with sess.post(SOLANA_RPC, json=payload, timeout=12) as r:
-            if r.status != 200:
-                return None
-            result = await r.json()
-            accounts = result.get("result", [])
-            if accounts:
-                pair_addr = accounts[0]["pubkey"]
-                log.info(f"  → RPC PAIR FOUND: {mint[:8]} → {pair_addr[:8]}...")
-                return pair_addr
-    except Exception as e:
-        log.debug(f"RPC pair fetch error {mint[:8]}: {e}")
-    return None
+    async with sess.post(SOLANA_RPC, json=payload, timeout=15) as r:
+        if r.status != 200: return []
+        accounts = (await r.json()).get("result", [])
+        pairs = []
+        for acc in accounts[:50]:  # latest 50
+            data = acc["account"]["data"]["parsed"]["info"]
+            mint = data["mint"]
+            if mint in seen: continue
+            pairs.append({"baseToken": {"address": mint}})
+        return pairs
     
 # --------------------------------------------------------------------------- #
 #                               PAIR FETCH: DEXSCREENER + RPC ONLY
@@ -356,24 +349,15 @@ async def premium_pump_scanner(app: Application):
             try:
                 await asyncio.sleep(random.uniform(15, 25))
 
-                # === DEXSCREENER SEARCH: NEW PUMP.FUN PAIRS ===
-                url = "https://api.dexscreener.com/latest/dex/search?q=pumpfun&orderBy=pairAge&orderDir=asc"
-                log.info("Dexscreener scan: fetching new pump.fun pairs")
+                                # === RPC SCAN: NEW PUMP.FUN PAIRS (BYPASS DEXSCREENER) ===
+                log.info("RPC SCAN: fetching new pump.fun pairs")
+                pairs = await get_new_pump_pairs(sess)
+                if not pairs:
+                    log.info("No new pairs via RPC")
+                    await asyncio.sleep(20)
+                    continue
 
-                async with sess.get(url, timeout=15) as r:
-                    if r.status != 200:
-                        log.error(f"Dexscreener error: {r.status}")
-                        await asyncio.sleep(30)
-                        continue
-                    raw = await r.json()
-                    pairs = raw.get("pairs") or []
-                    if not pairs:
-                        log.info("No new pairs found")
-                        await asyncio.sleep(20)
-                        continue
-
-                log.info(f"Found {len(pairs)} new pump.fun pairs")
-                now = time.time()
+                log.info(f"RPC FOUND {len(pairs)} NEW PUMP.FUN TOKENS")
 
                 # === RESCAN OLD TOKENS EVERY 2 MINUTES ===
                 if int(time.time()) % 120 == 0:
@@ -431,7 +415,35 @@ async def premium_pump_scanner(app: Application):
                             continue
 
                         data = await r.json()
-                        pair = next((p for p in data.get("pairs", []) if p.get("dexId") == "pumpswap"), None)
+                                                # Use RPC pair address from queue
+                        pair_addr = next((p["pairAddress"] for p in pairs if p["baseToken"]["address"] == mint), None)
+                        if not pair_addr:
+                            log.warning(f"NO PAIR ADDR FOR {mint[:8]}")
+                            if mint in seen: del seen[mint]
+                            continue
+
+                        # Fetch live data from Raydium or fallback
+                        async with sess.get(f"https://api.raydium.io/v2/sdk/liquidity/mainnet.json", timeout=10) as r:
+                            if r.status != 200:
+                                log.warning(f"RAYDIUM API DOWN")
+                                if mint in seen: del seen[mint]
+                                continue
+                            ray_data = await r.json()
+                            pool = next((p for p in ray_data.get("official", []) + ray_data.get("unOfficial", []) if p.get("id") == pair_addr), None)
+                            if not pool:
+                                log.warning(f"NO RAYDIUM POOL FOR {mint[:8]}")
+                                if mint in seen: del seen[mint]
+                                continue
+
+                            fdv = float(pool.get("marketCap", 0) or 0)
+                            liq = float(pool.get("liquidity", 0) or 0)
+                            vol_5m = float(pool.get("volume5m", 0) or 0)
+                            sym = pool.get("baseMint", mint)[:8] + "..."
+
+                            if fdv == 0 or liq == 0:
+                                log.warning(f"BAD RAYDIUM DATA {mint[:8]}")
+                                if mint in seen: del seen[mint]
+                                continue
                         if not pair:
                             log.warning(f"NO PAIR → REMOVING DEAD TOKEN {mint[:8]} FROM SEEN")
                             if mint in seen: del seen[mint]
