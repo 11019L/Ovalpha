@@ -304,8 +304,10 @@ async def detect_large_buy(mint: str, sess) -> float:
 # --------------------------------------------------------------------------- #
 #                               RPC PAIR FETCH — NEWEST ONLY
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+#                               FINAL RPC LAUNCH DETECTOR (BASE64 + PARSED)
+# --------------------------------------------------------------------------- #
 async def get_new_pump_pairs(sess):
-    """Get only the *newest* pump.fun launches using getSignaturesForAddress"""
     program_id = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
     payload = {
         "jsonrpc": "2.0", "id": 1,
@@ -314,9 +316,7 @@ async def get_new_pump_pairs(sess):
     }
     try:
         async with sess.post(SOLANA_RPC, json=payload, timeout=15) as r:
-            if r.status != 200:
-                log.warning(f"RPC sig error {r.status}")
-                return []
+            if r.status != 200: return []
             result = await r.json()
             sigs = result.get("result", [])
             log.info(f"RPC SIGS: {len(sigs)} recent pump.fun txs")
@@ -326,32 +326,58 @@ async def get_new_pump_pairs(sess):
                 tx_payload = {
                     "jsonrpc": "2.0", "id": 1,
                     "method": "getTransaction",
-                    "params": [sig["signature"], {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}]
+                    "params": [
+                        sig["signature"],
+                        {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}
+                    ]
                 }
                 async with sess.post(SOLANA_RPC, json=tx_payload, timeout=10) as tx_r:
                     if tx_r.status != 200: continue
                     tx_data = await tx_r.json()
-                    if not tx_data.get("result"): continue
+                    result = tx_data.get("result")
+                    if not result: continue
 
-                    # Look for mint in instructions
-                    instructions = tx_data["result"]["transaction"]["message"]["instructions"]
+                    # Try parsed first
+                    instructions = result["transaction"]["message"].get("instructions", [])
+                    mint = None
+                    pair_addr = None
+
                     for instr in instructions:
-                        if instr.get("programId") != program_id: continue
-                        parsed = instr.get("parsed", {})
-                        if parsed.get("type") != "create": continue
-                        info = parsed.get("info", {})
-                        mint = info.get("mint")
-                        if not mint or mint in seen: continue
+                        # PARSED
+                        if "parsed" in instr:
+                            info = instr["parsed"].get("info", {})
+                            if info.get("mint"):
+                                mint = info["mint"]
+                                pair_addr = info.get("bondingCurve")
+                                break
+                        # BASE64 DECODE
+                        elif "data" in instr and "programId" in instr:
+                            if instr["programId"] != program_id: continue
+                            try:
+                                import base64
+                                data_b64 = instr["data"]
+                                data_bytes = base64.b64decode(data_b64)
+                                # First 8 bytes = discriminator for "create"
+                                if data_bytes[:8] == b'\x00\x00\x00\x00\x00\x00\x00\x00':
+                                    # Extract mint from account keys
+                                    accounts = result["transaction"]["message"]["accountKeys"]
+                                    mint = accounts[4]  # mint is 5th account in create
+                                    pair_addr = accounts[1]  # bonding curve
+                                    break
+                            except: continue
 
-                        # Fake pair for compatibility
-                        pairs.append({
-                            "baseToken": {"address": mint, "symbol": "NEW"},
-                            "pairAddress": info.get("bondingCurve") or "unknown"
-                        })
-                        break
-            return pairs[:20]  # Only newest 20
+                    if not mint or mint in seen: continue
+
+                    pairs.append({
+                        "baseToken": {"address": mint, "symbol": "NEW"},
+                        "pairAddress": pair_addr or "unknown"
+                    })
+                    seen[mint] = time.time()
+                    log.debug(f"  → NEW LAUNCH: {mint[:8]}")
+
+            return pairs[:15]
     except Exception as e:
-        log.error(f"RPC new pairs error: {e}")
+        log.error(f"RPC launch detect error: {e}")
         return []
     
 # --------------------------------------------------------------------------- #
