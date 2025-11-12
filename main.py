@@ -409,24 +409,29 @@ async def premium_pump_scanner(app: Application):
                         log.debug(f"Queue add error: {e}")
                         continue
 
-                # === PROCESS READY QUEUE (180s+ OLD) ===
-                for mint in list(ready_queue):
-                    if time.time() - seen[mint] < 180:  # ← 3 MINUTES = FULL SAFETY
-                        log.debug(f"  → SKIP: {mint[:8]} waiting 180s for full safety")
+                                # === PROCESS READY QUEUE (180s+ OLD) ===
+                  for mint in list(ready_queue):
+                    if time.time() - seen[mint] < 180:
+                        age = int(time.time() - seen[mint])
+                        log.debug(f"  → SKIP: {mint[:8]} waiting 180s (age: {age}s)")
                         continue
 
-                    log.info(f"  → 180s REACHED: {mint[:8]} → PROCESSING FROM QUEUE")
-                    ready_queue.remove(mint)
+                    age = int(time.time() - seen[mint])
+                    log.info(f"  → 180s REACHED: {mint[:8]} (age: {age}s) → PROCESSING FROM QUEUE")
+                    ready_queue.remove(mint)  # ← REMOVE NOW
 
-                    # Fetch fresh data by mint
+                    # Fetch fresh data
                     async with sess.get(f"https://api.dexscreener.com/latest/dex/token/{mint}", timeout=10) as r:
                         if r.status != 200:
-                            log.warning(f"Failed to fetch token data for {mint[:8]}: {r.status}")
+                            log.warning(f"404 → REMOVING DEAD TOKEN {mint[:8]} FROM SEEN")
+                            if mint in seen: del seen[mint]
                             continue
+
                         data = await r.json()
                         pair = next((p for p in data.get("pairs", []) if p.get("dexId") == "pumpswap"), None)
                         if not pair:
-                            log.warning(f"No pump.fun pair found for {mint[:8]}")
+                            log.warning(f"NO PAIR → REMOVING DEAD TOKEN {mint[:8]} FROM SEEN")
+                            if mint in seen: del seen[mint]
                             continue
 
                         try:
@@ -437,8 +442,8 @@ async def premium_pump_scanner(app: Application):
                             pair_addr = pair.get("pairAddress")
 
                             if fdv == 0 or liq == 0 or not pair_addr:
-                                skip_counter["bad_data"] += 1
-                                log.warning(f"Bad data for {mint[:8]}: FDV ${fdv}, Liq ${liq}")
+                                log.warning(f"BAD DATA → REMOVING {mint[:8]}")
+                                if mint in seen: del seen[mint]
                                 continue
 
                             log.info(f"QUEUE PROCESS {sym} | FDV ${fdv:,.0f} | Vol ${vol_5m:,.0f} | Liq ${liq:,.0f}")
@@ -449,6 +454,7 @@ async def premium_pump_scanner(app: Application):
                             if not safe:
                                 skip_counter["rug"] += 1
                                 log.warning(f"  → RUG FAILED: {mint[:8]} | {reason}")
+                                if mint in seen: del seen[mint]
                                 continue
 
                             # === WHALE ===
@@ -482,7 +488,8 @@ async def premium_pump_scanner(app: Application):
                                     await broadcast(msg, InlineKeyboardMarkup(kb) if kb else None)
 
                         except Exception as e:
-                            log.debug(f"Queue process error {mint[:8]}: {e}")
+                            log.error(f"PROCESS ERROR {mint[:8]}: {e}")
+                            if mint in seen: del seen[mint]
                             continue
 
                 log.info(f"Scanner round | Skips: {dict(skip_counter)} | Seen: {len(seen)} | Queue: {len(ready_queue)}")
