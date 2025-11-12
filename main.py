@@ -428,7 +428,8 @@ async def premium_pump_scanner(app: Application):
                                     continue
                                 await process_token(pair, sess, volume_hist, token_state)
 
-                # Clean seen cache (1h)
+                                # === CLEAN SEEN CACHE (1h) ===
+                now = time.time()  # ← ADD THIS LINE
                 old = [m for m, t in seen.items() if now - t > 3600]
                 for m in old: del seen[m]
 
