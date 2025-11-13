@@ -518,26 +518,43 @@ async def process_token(mint, sess, now):
 
 async def premium_pump_scanner():
     log.info("SCANNER STARTED – polling for new pump.fun launches...")
-    async with aiohttp.ClientSession() as sess:
-        while True:
-            try:
-                await asyncio.sleep(random.uniform(55, 65))
-                log.debug("Fetching recent signatures...")
-                await get_new_pump_pairs(sess)
-    async with aiohttp.ClientSession() as sess:
-        while True:
-            try:
-                await asyncio.sleep(random.uniform(55, 65))
-                await get_new_pump_pairs(sess)
-                now = time.time()
-                for mint in list(ready_queue):
-                    if now - seen[mint] < 60:
-                        continue
-                    ready_queue.remove(mint)
-                    await process_token(mint, sess, now)
-            except Exception as e:
-                log.exception(e)
-                await asyncio.sleep(30)
+    sess = None
+    try:
+        # ONE session for the whole scanner lifetime
+        sess = aiohttp.ClientSession()
+        async with sess:
+            while True:
+                try:
+                    # -------------------------------------------------
+                    # 1. Pull recent signatures (new launches)
+                    # -------------------------------------------------
+                    await asyncio.sleep(random.uniform(55, 65))
+                    log.debug("Fetching recent signatures...")
+                    await get_new_pump_pairs(sess)
+
+                    # -------------------------------------------------
+                    # 2. Process tokens that are old enough (>60 s)
+                    # -------------------------------------------------
+                    now = time.time()
+                    for mint in list(ready_queue):
+                        if now - seen[mint] < 60:
+                            continue
+                        ready_queue.remove(mint)
+                        await process_token(mint, sess, now)
+
+                except Exception as e:
+                    # Any error inside the loop → log + short pause
+                    log.exception(f"Scanner loop error: {e}")
+                    await asyncio.sleep(30)
+
+    except Exception as e:
+        # Session creation failed
+        log.exception(f"Failed to create aiohttp session: {e}")
+    finally:
+        # Always close the session cleanly
+        if sess is not None:
+            await sess.close()
+        log.info("SCANNER STOPPED")
 
 # --------------------------------------------------------------------------- #
 # ALERT
