@@ -207,16 +207,24 @@ async def build_menu(uid: int, edit: bool = False):
     u = users[uid]
     open_trades = sum(1 for t in u.get("trades", []) if t["status"] == "open")
     total_pnl = sum(t.get("profit", 0) for t in u.get("trades", []) if t["status"] == "sold")
-    wallet_btn = (InlineKeyboardButton("Connect Wallet", url=generate_phantom_link(uid))
-                  if not u.get("wallet") else InlineKeyboardButton("Wallet", callback_data="wallet"))
+
+    # Fixed status line – no nested f-string
+    status = "Premium" if u.get("paid") else f"{u.get('free_alerts', 0)} Free"
+
+    wallet_btn = (
+        InlineKeyboardButton("Connect Wallet", url=generate_phantom_link(uid))
+        if not u.get("wallet") else InlineKeyboardButton("Wallet", callback_data="wallet")
+    )
+
     msg = (
         "<b>ONION X – DASHBOARD</b>\n\n"
-        f"Status: <code>{'Premium' if u.get('paid') else f'{u['free_alerts']} Free'}</code>\n"
+        f"Status: <code>{status}</code>\n"
         f"Buy: <code>{fmt_sol(u['default_buy_sol'])}</code>\n"
         f"Wallet: <code>{short_addr(u.get('wallet'))}</code>\n\n"
         f"Open: <code>{open_trades}</code>\n"
         f"PnL: <code>{fmt_usd(total_pnl)}</code>"
     )
+
     kb = [
         [wallet_btn, InlineKeyboardButton("Settings", callback_data="settings")],
         [InlineKeyboardButton("Live Trades", callback_data="live_trades"),
