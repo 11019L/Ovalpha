@@ -13,8 +13,8 @@ from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    ParseMode,
 )
+from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
     CommandHandler,
