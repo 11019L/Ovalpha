@@ -44,14 +44,10 @@ SOLANA_RPC = os.getenv("SOLANA_RPC", "https://api.mainnet-beta.solana.com")
 DATA_FILE = Path("data.json")
 FEE_BPS = 100
 
-# THRESHOLDS (unchanged)
+# THRESHOLDS
 MIN_FDVS_SNIPE = 1200
 MAX_FDVS_SNIPE = 3000
 MAX_VOL_SNIPE = 160
-MIN_WHALE_SINGLE = 600
-MIN_VOLUME_SURGE = 1800
-MIN_BUYERS_SURGE = 8
-MIN_SOCIAL = 2
 LIQ_FDV_RATIO = 0.9
 
 # --------------------------------------------------------------------------- #
@@ -117,6 +113,22 @@ def short_addr(addr: str) -> str:
     return f"{addr[:8]}...{addr[-4:]}" if addr else "—"
 
 # --------------------------------------------------------------------------- #
+# ADMIN – SEND RAW CA
+# --------------------------------------------------------------------------- #
+async def notify_admin_new_ca(mint: str):
+    if not admin_id:
+        return
+    try:
+        msg = (
+            "<b>NEW LAUNCH DETECTED</b>\n"
+            f"CA: <code>{short_addr(mint)}</code>\n"
+            f"<a href='https://solscan.io/token/{mint}'>Solscan</a> | "
+            f"<a href='https://dexscreener.com/solana/{mint}'>DexScreener</a>"
+        )
+        await app.bot.send_message(admin_id, msg, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    except Exception as e:
+        log.error(f"Failed to notify admin: {e}")
+# --------------------------------------------------------------------------- #
 # START
 # --------------------------------------------------------------------------- #
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -139,7 +151,6 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             admin_id = uid
             log.info(f"ADMIN SET: {uid}")
     users[uid]["chat_id"] = chat_id
-
     await send_welcome(uid)
 
 # --------------------------------------------------------------------------- #
@@ -168,7 +179,6 @@ async def build_menu(uid: int, edit: bool = False):
     open_trades = sum(1 for t in u.get("trades", []) if t["status"] == "open")
     total_pnl = sum(t.get("profit", 0) for t in u.get("trades", []) if t["status"] == "sold")
     pnl_str = fmt_usd(total_pnl)
-
     wallet = short_addr(u.get("wallet"))
 
     msg = (
@@ -300,24 +310,23 @@ async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         mint = data.split("_", 1)[1]
         await jupiter_buy(uid, mint, users[uid]["default_buy_sol"])
 
-    # ----- quick setters (you can expand with MessageHandler if you want input) -----
+    # ----- quick setters -----
     elif data in ("set_buy", "set_tp", "set_sl"):
         await q.edit_message_text(
             f"<b>{data.replace('set_', '').upper()}</b>\n\nSend new value (e.g. <code>0.2</code> for BUY SOL).",
             parse_mode=ParseMode.HTML
         )
-        # store pending action in user dict – simple approach
         users[uid]["pending_set"] = data
 
 # --------------------------------------------------------------------------- #
-# TEXT HANDLER (connect + quick setters)
+# TEXT HANDLER
 # --------------------------------------------------------------------------- #
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     text = update.message.text.strip()
     u = users[uid]
 
-    # ----- /connect -------------------------------------------------
+    # /connect
     if text.lower().startswith("/connect "):
         try:
             key = text.split(" ", 1)[1]
@@ -333,7 +342,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Invalid private key")
         return
 
-    # ----- quick setters -------------------------------------------------
+    # quick setters
     if u.get("pending_set"):
         try:
             val = float(text)
@@ -353,14 +362,13 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         elif what == "set_sl":
             u["default_sl"] = val
             await update.message.reply_text(f"Stop-Loss set to <code>{val:.2f}x</code>", parse_mode=ParseMode.HTML)
-        await build_menu(uid)  # refresh
+        await build_menu(uid)
         return
 
-    # ----- fallback -------------------------------------------------
     await update.message.reply_text("Unknown command. Use /menu or the buttons.")
 
 # --------------------------------------------------------------------------- #
-# JUPITER BUY (unchanged logic, nicer message)
+# JUPITER BUY
 # --------------------------------------------------------------------------- #
 async def jupiter_buy(uid: int, mint: str, sol_amount: float):
     if uid not in users or not users[uid].get("private_key"):
@@ -417,12 +425,106 @@ async def jupiter_buy(uid: int, mint: str, sol_amount: float):
         return False
 
 # --------------------------------------------------------------------------- #
-# SCANNER (unchanged)
+# SCANNER – FULLY RESTORED
 # --------------------------------------------------------------------------- #
-# ... (get_new_pump_pairs, get_tx, process_token, premium_pump_scanner) ...
+async def get_new_pump_pairs(sess):
+    program_id = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getSignaturesForAddress",
+        "params": [program_id, {"limit": 40}]
+    }
+    try:
+        async with sess.post(SOLANA_RPC, json=payload, timeout=15) as r:
+            if r.status != 200:
+                return
+            sigs = (await r.json()).get("result", [])
+        for sig in sigs:
+            tx = await get_tx(sig["signature"], sess)
+            if not tx:
+                continue
+            logs = tx.get("meta", {}).get("logMessages", [])
+            if not any("Instruction: Create" in l for l in logs):
+                continue
+            mint = None
+            for inner in tx.get("meta", {}).get("innerInstructions", []):
+                for instr in inner.get("instructions", []):
+                    p = instr.get("parsed", {})
+                    if instr.get("program") == "spl-token" and p.get("type") in ("initializeMint", "initializeMint2"):
+                        mint = p["info"]["mint"]
+                        break
+                if mint:
+                    break
+            if mint and mint not in seen:
+                seen[mint] = time.time()
+                token_db[mint] = {"launched": time.time(), "alerted": False}
+                ready_queue.append(mint)
+                log.info(f"LAUNCH DETECTED → {mint[:8]}...{mint[-4:]}")
+                await notify_admin_new_ca(mint)
+    except Exception as e:
+        log.error(f"RPC Error: {e}")
+
+async def get_tx(sig, sess):
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getTransaction",
+        "params": [sig, {"encoding": "jsonParsed"}]
+    }
+    async with sess.post(SOLANA_RPC, json=payload, timeout=10) as r:
+        if r.status != 200:
+            return None
+        return (await r.json()).get("result")
+
+async def process_token(mint, sess, now):
+    try:
+        async with sess.get(f"https://api.dexscreener.com/latest/dex/token/{mint}", timeout=10) as r:
+            if r.status != 200:
+                return
+            data = await r.json()
+        pair = next((p for p in data.get("pairs", []) if p.get("dexId") in ("pumpswap", "pump")), None)
+        if not pair:
+            return
+        sym = pair["baseToken"]["symbol"][:20]
+        fdv = float(pair.get("fdv", 0) or 0)
+        liq = float(pair.get("liquidity", {}).get("usd", 0) or 0)
+        vol_5m = float(pair.get("volume", {}).get("m5", 0) or 0)
+
+        if fdv < 500 or liq < 40:
+            return
+
+        age_min = int((now - seen[mint]) / 60)
+        if (
+            MIN_FDVS_SNIPE <= fdv <= MAX_FDVS_SNIPE and
+            vol_5m <= MAX_VOL_SNIPE and
+            liq >= LIQ_FDV_RATIO * fdv
+        ):
+            if not token_db[mint].get("alerted"):
+                token_db[mint]["alerted"] = True
+                log.info(f"GOLD ALERT → {sym} | FDV ${fdv:,.0f} | {age_min}m old")
+                await broadcast_alert(mint, sym, fdv, age_min)
+    except Exception as e:
+        log.error(f"Process error: {e}")
+
+async def premium_pump_scanner():
+    async with aiohttp.ClientSession() as sess:
+        while True:
+            try:
+                await asyncio.sleep(random.uniform(55, 65))
+                await get_new_pump_pairs(sess)
+                now = time.time()
+                for mint in list(ready_queue):
+                    if now - seen[mint] < 60:
+                        continue
+                    ready_queue.remove(mint)
+                    await process_token(mint, sess, now)
+            except Exception as e:
+                log.exception(e)
+                await asyncio.sleep(30)
 
 # --------------------------------------------------------------------------- #
-# ALERT (HTML card)
+# ALERT
 # --------------------------------------------------------------------------- #
 async def broadcast_alert(mint: str, sym: str, fdv: float, age_min: int):
     age_str = f" ({age_min}m old)" if age_min > 5 else ""
@@ -444,7 +546,7 @@ async def broadcast_alert(mint: str, sym: str, fdv: float, age_min: int):
                 u["free_alerts"] -= 1
 
 # --------------------------------------------------------------------------- #
-# AUTO-SELL (HTML)
+# AUTO-SELL
 # --------------------------------------------------------------------------- #
 async def check_auto_sell():
     while True:
@@ -474,7 +576,7 @@ async def check_auto_sell():
                     )
 
 # --------------------------------------------------------------------------- #
-# ADMIN COMMANDS (HTML)
+# ADMIN COMMANDS
 # --------------------------------------------------------------------------- #
 async def admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != admin_id:
@@ -511,13 +613,15 @@ async def main():
 
     await app.initialize()
     await app.start()
+
+    # Background tasks
     asyncio.create_task(premium_pump_scanner())
     asyncio.create_task(auto_save())
     asyncio.create_task(check_auto_sell())
-    log.info("ONION X v13 – UI OVERHAULED – LIVE")
+
+    log.info("ONION X v13 – UI + SCANNER FULLY WORKING – LIVE")
     await app.updater.start_polling()
     await asyncio.Event().wait()
-
 
 if __name__ == "__main__":
     asyncio.run(main())
