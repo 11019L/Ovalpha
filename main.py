@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import os
 import asyncio
 import json
@@ -8,12 +7,10 @@ import random
 from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv()
+
 import aiohttp
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
+
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -23,9 +20,12 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+
 from solders.keypair import Keypair
 from solana.rpc.async_api import AsyncClient
-from jupiter_python_sdk import Jupiter
+
+# CORRECT IMPORT
+from jupiter_python_sdk.jupiter import Jupiter
 
 # --------------------------------------------------------------------------- #
 # CONFIG & LOGGING
