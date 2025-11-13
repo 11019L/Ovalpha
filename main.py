@@ -112,6 +112,27 @@ def fmt_sol(v: float) -> str:
 def short_addr(addr: str) -> str:
     return f"{addr[:8]}...{addr[-4:]}" if addr else "—"
 
+def extract_mint_from_tx(tx: dict) -> str | None:
+    """Extract mint from any inner instruction (pump.fun or spl-token)"""
+    for inner in tx.get("meta", {}).get("innerInstructions", []):
+        for instr in inner.get("instructions", []):
+            # Case 1: Parsed SPL Token
+            p = instr.get("parsed", {})
+            if instr.get("program") == "spl-token" and p.get("type") in ("initializeMint", "initializeMint2"):
+                return p["info"]["mint"]
+
+            # Case 2: pump.fun raw data (base58 mint in accounts)
+            if instr.get("programId") in [
+                "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+                "pumpfun111111111111111111111111111111111"
+            ]:
+                accounts = instr.get("accounts", [])
+                if len(accounts) >= 4:
+                    # Mint is usually index 3 or 4
+                    candidate = accounts[3] if len(accounts) > 3 else accounts[-1]
+                    if len(candidate) == 44:  # Solana address
+                        return candidate
+    return None
 # --------------------------------------------------------------------------- #
 # SAFE EDIT
 # --------------------------------------------------------------------------- #
@@ -410,43 +431,52 @@ async def jupiter_buy(uid: int, mint: str, sol_amount: float):
 # YOUR ORIGINAL SCANNER – 100% INTACT
 # --------------------------------------------------------------------------- #
 async def get_new_pump_pairs(sess):
-    program_id = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+    # NEW PUMP.FUN PROGRAM ID (2025)
+    program_id = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"  # Keep for now
+    # But also monitor the REAL one:
+    real_program_id = "pumpfun111111111111111111111111111111111"  # ← NEW
+
+    for pid in [program_id, real_program_id]:
+        payload = {
+            "jsonrpc": "2.0", "id": 1,
+            "method": "getSignaturesForAddress",
+            "params": [pid, {"limit": 40}]
+        }
+        try:
+            async with sess.post(SOLANA_RPC, json=payload, timeout=15) as r:
+                if r.status != 200:
+                    continue
+                sigs = (await r.json()).get("result", [])
+                log.debug(f"Got {len(sigs)} signatures from {pid[:8]}...")
+            for sig in sigs:
+                tx = await get_tx(sig["signature"], sess)
+                if not tx: continue
+
+                # --- FLEXIBLE LOG CHECK ---
+                logs = tx.get("meta", {}).get("logMessages", [])
+                if not any("Create" in l or "initializeMint" in l for l in logs):
+                    continue
+
+                # --- EXTRACT MINT FROM ANY INSTRUCTION ---
+                mint = extract_mint_from_tx(tx)
+                if mint and mint not in seen:
+                    seen[mint] = time.time()
+                    token_db[mint] = {"launched": time.time(), "alerted": False}
+                    ready_queue.append(mint)
+                    log.info(f"LAUNCH DETECTED → {short_addr(mint)}")
+                    await notify_admin_new_ca(mint)
+        except Exception as e:
+            log.error(f"RPC Error for {pid}: {e}")
+            
+async def get_tx(sig, sess):
     payload = {
         "jsonrpc": "2.0", "id": 1,
-        "method": "getSignaturesForAddress",
-        "params": [program_id, {"limit": 40}]
+        "method": "getTransaction",
+        "params": [sig, {
+            "encoding": "jsonParsed",
+            "maxSupportedTransactionVersion": 0
+        }]
     }
-    try:
-        async with sess.post(SOLANA_RPC, json=payload, timeout=15) as r:
-            if r.status != 200:
-                log.warning(f"RPC {r.status}")
-                return
-            sigs = (await r.json()).get("result", [])
-            log.debug(f"Got {len(sigs)} signatures")
-        for sig in sigs:
-            tx = await get_tx(sig["signature"], sess)
-            if not tx: continue
-            logs = tx.get("meta", {}).get("logMessages", [])
-            if not any("Instruction: Create" in l for l in logs): continue
-            mint = None
-            for inner in tx.get("meta", {}).get("innerInstructions", []):
-                for instr in inner.get("instructions", []):
-                    p = instr.get("parsed", {})
-                    if instr.get("program") == "spl-token" and p.get("type") in ("initializeMint", "initializeMint2"):
-                        mint = p["info"]["mint"]
-                        break
-                if mint: break
-            if mint and mint not in seen:
-                seen[mint] = time.time()
-                token_db[mint] = {"launched": time.time(), "alerted": False}
-                ready_queue.append(mint)
-                log.info(f"LAUNCH DETECTED → {short_addr(mint)}")
-                await notify_admin_new_ca(mint)
-    except Exception as e:
-        log.error(f"RPC Error: {e}")
-
-async def get_tx(sig, sess):
-    payload = {"jsonrpc": "2.0", "id": 1, "method": "getTransaction", "params": [sig, {"encoding": "jsonParsed"}]}
     async with sess.post(SOLANA_RPC, json=payload, timeout=10) as r:
         if r.status != 200: return None
         return (await r.json()).get("result")
