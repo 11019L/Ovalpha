@@ -51,6 +51,15 @@ MAX_VOL_SNIPE = 160
 LIQ_FDV_RATIO = 0.9
 
 # --------------------------------------------------------------------------- #
+# CONFIG & LOGGING
+# --------------------------------------------------------------------------- #
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
+log = logging.getLogger("onion")
+log.setLevel(logging.INFO)  # ← ADD THIS LINE
+# --------------------------------------------------------------------------- #
 # STATE
 # --------------------------------------------------------------------------- #
 seen = {}
@@ -508,6 +517,13 @@ async def process_token(mint, sess, now):
         log.error(f"Process error: {e}")
 
 async def premium_pump_scanner():
+    log.info("SCANNER STARTED – polling for new pump.fun launches...")
+    async with aiohttp.ClientSession() as sess:
+        while True:
+            try:
+                await asyncio.sleep(random.uniform(55, 65))
+                log.debug("Fetching recent signatures...")
+                await get_new_pump_pairs(sess)
     async with aiohttp.ClientSession() as sess:
         while True:
             try:
