@@ -323,6 +323,13 @@ async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         mint = data.split("_", 1)[1]
         await jupiter_buy(uid, mint, users[uid]["default_buy_sol"])
 
+    elif data.startswith("copy_"):
+        mint = data.split("_", 1)[1]
+        await q.edit_message_text(
+        f"<b>COPY CA</b>\n<code>{mint}</code>\n\nCopied to clipboard!",
+        parse_mode=ParseMode.HTML
+    )
+    # Telegram auto-copies <code> blocks on mobile
 # --------------------------------------------------------------------------- #
 # TEXT HANDLER (connect + quick setters)
 # --------------------------------------------------------------------------- #
@@ -565,9 +572,12 @@ async def broadcast_alert(mint: str, sym: str, fdv: float, age_min: int):
         "CA: <code>{}</code>\n"
         "FDV: <code>${:,.0f}</code>"
     ).format(age_str, sym, short_addr(mint), fdv)
+
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("AUTO‑BUY", callback_data=f"autobuy_{mint}")]
+        [InlineKeyboardButton("AUTO-BUY", callback_data=f"autobuy_{mint}")],
+        [InlineKeyboardButton("Copy CA", callback_data=f"copy_{mint}")]
     ])
+
     for uid, u in users.items():
         if u.get("paid") or u.get("free_alerts", 0) > 0:
             await app.bot.send_message(u["chat_id"], msg, reply_markup=kb, parse_mode=ParseMode.HTML)
