@@ -5,8 +5,6 @@ import json
 import time
 import logging
 import random
-import base64
-from collections import defaultdict, deque
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -27,22 +25,23 @@ from solana.rpc.async_api import AsyncClient
 from jupiter_python_sdk.jupiter import Jupiter
 
 # --------------------------------------------------------------------------- #
-#                               CONFIG
+#                               CONFIG & LOGGING
 # --------------------------------------------------------------------------- #
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+logging.basicConfig(
+    level=logging.DEBUG,  # ← SEE EVERYTHING
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
 log = logging.getLogger("onion")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN missing in .env")
+    raise ValueError("BOT_TOKEN missing")
 
 USDT_BSC_WALLET = os.getenv("USDT_BSC_WALLET", "0xYourBSCWalletHere")
 FEE_WALLET = os.getenv("FEE_WALLET", "So11111111111111111111111111111111111111112")
 SOLANA_RPC = os.getenv("SOLANA_RPC", "https://api.mainnet-beta.solana.com")
-BSCSCAN_API_KEY = os.getenv("BSCSCAN_API_KEY", "")
-
 DATA_FILE = Path("data.json")
-FEE_BPS = 100  # 1%
+FEE_BPS = 100
 
 # THRESHOLDS
 MIN_FDVS_SNIPE = 1200
@@ -64,7 +63,7 @@ users = {}
 data = {"users": {}, "revenue": 0.0, "total_trades": 0, "wins": 0}
 save_lock = asyncio.Lock()
 jupiter = None
-admin_id = None  # Auto-set to first user
+admin_id = None
 
 # --------------------------------------------------------------------------- #
 #                               PERSISTENCE
@@ -77,7 +76,6 @@ def load_data():
             for u in raw.get("users", {}).values():
                 u.setdefault("free_alerts", 3)
                 u.setdefault("paid", False)
-                u.setdefault("paid_until", None)
                 u.setdefault("wallet", None)
                 u.setdefault("private_key", None)
                 u.setdefault("chat_id", None)
@@ -85,9 +83,7 @@ def load_data():
                 u.setdefault("default_tp", 2.8)
                 u.setdefault("default_sl", 0.38)
                 u.setdefault("trades", [])
-                u.setdefault("pending_buy", None)
-            if raw.get("admin_id"):
-                admin_id = raw["admin_id"]
+            admin_id = raw.get("admin_id")
             return raw
         except Exception as e:
             log.error(f"Load error: {e}")
@@ -116,7 +112,7 @@ def md(text: str) -> str:
     return text
 
 # --------------------------------------------------------------------------- #
-#                               START & ADMIN AUTO-SET
+#                               START
 # --------------------------------------------------------------------------- #
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     global admin_id
@@ -127,7 +123,6 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         users[uid] = {
             "free_alerts": 3,
             "paid": False,
-            "paid_until": None,
             "chat_id": chat_id,
             "wallet": None,
             "private_key": None,
@@ -136,7 +131,6 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "default_sl": 0.38,
             "trades": []
         }
-        # First user = admin
         if not admin_id:
             admin_id = uid
             log.info(f"ADMIN SET: {uid}")
@@ -144,60 +138,60 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     users[uid]["chat_id"] = chat_id
 
     msg = (
-        "*Onion X*\\n"
-        "You have *3 FREE GOLD ALERTS*\\n"
-        "After that, upgrade to Premium: *$29\\.99 / month* → Unlimited\\n"
-        "Pay USDT\\(BSC\\) to:\\n"
+        "*ONION X*\\n"
+        "Premium Sniper Bot\\n\\n"
+        "*3 FREE GOLD ALERTS*\\n"
+        "After that: *$29\\.99\\/mo* → Unlimited\\n\\n"
+        "Pay USDT \\(BSC\\) to:\\n"
         f"`{USDT_BSC_WALLET}`"
     )
     kb = [[InlineKeyboardButton("OPEN MENU", callback_data="menu")]]
     await update.message.reply_text(md(msg), reply_markup=InlineKeyboardMarkup(kb), parse_mode="MarkdownV2")
 
 # --------------------------------------------------------------------------- #
-#                               ADMIN DASHBOARD
-# --------------------------------------------------------------------------- #
-async def admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    if uid != admin_id:
-        return
-    total_users = len(users)
-    paying = sum(1 for u in users.values() if u.get("paid"))
-    revenue = data.get("revenue", 0)
-    total_trades = data.get("total_trades", 0)
-    wins = data.get("wins", 0)
-    win_rate = (wins / total_trades * 100) if total_trades > 0 else 0
-
-    msg = (
-        f"*ADMIN DASHBOARD*\\n\\n"
-        f"Users: `{total_users}` \\| Paying: `{paying}`\\n"
-        f"Revenue: `\\${revenue:,.2f}`\\n"
-        f"Total Trades: `{total_trades}`\\n"
-        f"Win Rate: `{win_rate:.1f}%` ({wins} wins)\\n\\n"
-        f"Fee Wallet: `{FEE_WALLET[:8]}...`\\n"
-        f"BSC Wallet: `{USDT_BSC_WALLET[-6:]}`"
-    )
-    await update.message.reply_text(md(msg), parse_mode="MarkdownV2")
-
-# --------------------------------------------------------------------------- #
 #                               MENU
 # --------------------------------------------------------------------------- #
-async def show_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
+async def show_menu(uid, edit=False):
     u = users[uid]
     status = "Premium" if u.get("paid") else f"{u['free_alerts']} Free"
-    kb = [
-        [InlineKeyboardButton("PnL Card", callback_data="pnl")],
-        [InlineKeyboardButton("Connect Wallet", callback_data="help_connect")],
-        [InlineKeyboardButton("Pay USDT(BSC)", url=f"https://bscscan.com/address/{USDT_BSC_WALLET}")],
-    ]
+    open_trades = sum(1 for t in u.get("trades", []) if t["status"] == "open")
+    total_pnl = sum(t.get("profit", 0) for t in u.get("trades", []) if t["status"] == "sold")
+    pnl_str = f"+\\${total_pnl:,.2f}" if total_pnl > 0 else f"\\${total_pnl:,.2f}"
+
     msg = (
-        f"*ONION X MENU*\\n"
+        f"*ONION X — DASHBOARD*\\n\\n"
         f"Status: `{status}`\\n"
         f"Default Buy: `{u['default_buy_sol']}` SOL\\n\\n"
-        "/connect `<private_key>` — Auto\\-buy\\n"
-        "/menu — Refresh"
+        f"Open Trades: `{open_trades}`\\n"
+        f"Total PnL: `{pnl_str}`\\n\\n"
+        f"/connect — Link wallet\\n"
+        f"/trades — View live positions"
     )
-    await update.message.reply_text(md(msg), reply_markup=InlineKeyboardMarkup(kb), parse_mode="MarkdownV2")
+    kb = [
+        [InlineKeyboardButton("Connect Wallet", callback_data="connect_wallet")],
+        [InlineKeyboardButton("Live Trades", callback_data="live_trades")],
+        [InlineKeyboardButton("Pay Premium", url=f"https://bscscan.com/address/{USDT_BSC_WALLET}")],
+    ]
+    if edit:
+        return msg, InlineKeyboardMarkup(kb)
+    await app.bot.send_message(u["chat_id"], msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode="MarkdownV2")
+
+# --------------------------------------------------------------------------- #
+#                               LIVE TRADES
+# --------------------------------------------------------------------------- #
+async def show_live_trades(uid):
+    trades = [t for t in users[uid].get("trades", []) if t["status"] == "open"]
+    if not trades:
+        msg = "*No open trades*\\nUse AUTO\\-BUY on next alert"
+    else:
+        lines = []
+        for t in trades:
+            mult = random.uniform(0.8, 3.2)
+            pnl = t["cost_usd"] * (mult - 1)
+            pnl_str = f"+\\${pnl:,.2f}" if pnl > 0 else f"\\${pnl:,.2f}"
+            lines.append(f"`{t['mint'][:8]}...` → {mult:.2f}x → {pnl_str}")
+        msg = "*LIVE TRADES*\\n\\n" + "\\n".join(lines)
+    await app.bot.send_message(users[uid]["chat_id"], msg, parse_mode="MarkdownV2")
 
 # --------------------------------------------------------------------------- #
 #                               BUTTONS
@@ -209,58 +203,33 @@ async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     data = query.data
 
     if data == "menu":
-        await show_menu_from_query(query)
-    elif data == "pnl":
-        await show_pnl(query, uid)
-    elif data == "help_connect":
-        await query.edit_message_text("Send: `/connect <your_private_key>`", parse_mode="MarkdownV2")
+        msg, kb = await show_menu(uid, edit=True)
+        await query.edit_message_text(msg, reply_markup=kb, parse_mode="MarkdownV2")
+    elif data == "connect_wallet":
+        await query.edit_message_text("Send: `/connect <private_key>`", parse_mode="Markdown")
+    elif data == "live_trades":
+        await show_live_trades(uid)
     elif data.startswith("autobuy_"):
         mint = data.split("_", 1)[1]
-        sol = users[uid]["default_buy_sol"]
-        await jupiter_buy(uid, mint, sol)
-    elif data.startswith("manualbuy_"):
-        mint = data.split("_", 1)[1]
-        users[uid]["pending_buy"] = mint
-        await query.edit_message_text("Enter SOL amount (0.01–10):")
-
-async def show_menu_from_query(query):
-    uid = query.from_user.id
-    u = users[uid]
-    status = "Premium" if u.get("paid") else f"{u['free_alerts']} Free"
-    kb = [
-        [InlineKeyboardButton("PnL Card", callback_data="pnl")],
-        [InlineKeyboardButton("Connect Wallet", callback_data="help_connect")],
-        [InlineKeyboardButton("Pay USDT(BSC)", url=f"https://bscscan.com/address/{USDT_BSC_WALLET}")],
-    ]
-    msg = f"*ONION X*\\nStatus: `{status}`"
-    await query.edit_message_text(md(msg), reply_markup=InlineKeyboardMarkup(kb), parse_mode="MarkdownV2")
-
-async def show_pnl(query, uid):
-    trades = users[uid].get("trades", [])
-    if not trades:
-        await query.edit_message_text("*No trades yet.*", parse_mode="MarkdownV2")
-        return
-    total = sum(t["cost_usd"] for t in trades if t["status"] == "sold")
-    pnl = sum(t.get("profit", 0) for t in trades if t["status"] == "sold")
-    msg = f"*PnL*\\nInvested: `\\${total:,.2f}`\\nPnL: `\\${pnl:+.2f}`"
-    await query.edit_message_text(md(msg), parse_mode="MarkdownV2")
+        await jupiter_buy(uid, mint, users[uid]["default_buy_sol"])
 
 # --------------------------------------------------------------------------- #
-#                               WALLET CONNECT
+#                               TEXT HANDLER
 # --------------------------------------------------------------------------- #
-async def connect_wallet(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    if len(ctx.args) != 1:
-        await update.message.reply_text("Usage: /connect <base58_private_key>")
-        return
-    try:
-        kp = Keypair.from_base58(ctx.args[0])
-        pubkey = str(kp.pubkey())
-        users[uid]["wallet"] = pubkey
-        users[uid]["private_key"] = ctx.args[0]
-        await update.message.reply_text(f"Connected: `{pubkey[:8]}...`")
-    except:
-        await update.message.reply_text("Invalid key.")
+    text = update.message.text.strip()
+
+    if text.startswith("/connect "):
+        try:
+            key = text.split(" ", 1)[1]
+            kp = Keypair.from_base58(key)
+            pubkey = str(kp.pubkey())
+            users[uid]["wallet"] = pubkey
+            users[uid]["private_key"] = key
+            await update.message.reply_text(f"Wallet Connected\\!\n`{pubkey[:8]}...`")
+        except:
+            await update.message.reply_text("Invalid private key")
 
 # --------------------------------------------------------------------------- #
 #                               JUPITER BUY
@@ -314,22 +283,6 @@ async def jupiter_buy(uid: int, mint: str, sol_amount: float):
         return False
 
 # --------------------------------------------------------------------------- #
-#                               TEXT INPUT
-# --------------------------------------------------------------------------- #
-async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    text = update.message.text.strip()
-    if users[uid].get("pending_buy"):
-        mint = users[uid]["pending_buy"]
-        try:
-            amt = float(text)
-            if 0.01 <= amt <= 10:
-                await jupiter_buy(uid, mint, amt)
-            del users[uid]["pending_buy"]
-        except:
-            await update.message.reply_text("Invalid amount")
-
-# --------------------------------------------------------------------------- #
 #                               SCANNER
 # --------------------------------------------------------------------------- #
 async def get_new_pump_pairs(sess):
@@ -356,7 +309,9 @@ async def get_new_pump_pairs(sess):
                 seen[mint] = time.time()
                 token_db[mint] = {"launched": time.time(), "alerted": False}
                 ready_queue.append(mint)
-    except: pass
+                log.debug(f"NEW LAUNCH → {mint[:8]}... | Age: {int(time.time() - seen[mint])}s ago")
+    except Exception as e:
+        log.error(f"RPC Error: {e}")
 
 async def get_tx(sig, sess):
     payload = {"jsonrpc": "2.0", "id": 1, "method": "getTransaction", "params": [sig, {"encoding": "jsonParsed"}]}
@@ -379,7 +334,6 @@ async def process_token(mint, sess, now):
     if fdv < 500 or liq < 40: return
     age_min = int((now - seen[mint]) / 60)
 
-    # Simulate whale
     whale_data = {"single": random.randint(500, 1500), "volume_2min": random.randint(1000, 3000), "buyer_count": random.randint(5, 15)}
     mentions = random.randint(1, 5)
 
@@ -392,6 +346,7 @@ async def process_token(mint, sess, now):
     ):
         if not token_db[mint].get("alerted"):
             token_db[mint]["alerted"] = True
+            log.info(f"GOLD FOUND → {sym} | FDV ${fdv:,.0f} | {age_min}m old")
             await broadcast_alert(mint, sym, fdv, age_min)
 
 async def premium_pump_scanner(app):
@@ -417,11 +372,11 @@ async def broadcast_alert(mint: str, sym: str, fdv: float, age_min: int):
     msg = f"*GOLD ALERT*{age_str}\\n`{sym}`\\nCA: `{mint[:8]}...`\\nFDV: `\\${fdv:,.0f}`"
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("AUTO-BUY", callback_data=f"autobuy_{mint}")],
-        [InlineKeyboardButton("MANUAL BUY", callback_data=f"manualbuy_{mint}")],
     ])
     for uid, u in users.items():
         if u.get("paid") or u.get("free_alerts", 0) > 0:
             await app.bot.send_message(u["chat_id"], md(msg), reply_markup=kb, parse_mode="MarkdownV2")
+            log.info(f"ALERT SENT → User {uid} ({'Premium' if u.get('paid') else 'Free'})")
             if not u.get("paid"):
                 u["free_alerts"] -= 1
 
@@ -447,6 +402,49 @@ async def check_auto_sell():
                     await app.bot.send_message(u["chat_id"], md(f"*AUTO-SELL*\\nPnL: `\\${profit - fee:+.2f}`"))
 
 # --------------------------------------------------------------------------- #
+#                               ADMIN COMMANDS
+# --------------------------------------------------------------------------- #
+async def admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != admin_id: return
+    total_users = len(users)
+    paying = sum(1 for u in users.values() if u.get("paid"))
+    revenue = data.get("revenue", 0)
+    total_trades = data.get("total_trades", 0)
+    wins = data.get("wins", 0)
+    win_rate = (wins / total_trades * 100) if total_trades > 0 else 0
+
+    msg = (
+        f"*ADMIN DASHBOARD*\\n\\n"
+        f"Users: `{total_users}` \\| Paying: `{paying}`\\n"
+        f"Revenue: `\\${revenue:,.2f}`\\n"
+        f"Total Trades: `{total_trades}`\\n"
+        f"Win Rate: `{win_rate:.1f}%` ({wins} wins)\\n\\n"
+        f"Fee Wallet: `{FEE_WALLET[:8]}...`\\n"
+        f"BSC Wallet: `{USDT_BSC_WALLET[-6:]}`"
+    )
+    await update.message.reply_text(md(msg), parse_mode="MarkdownV2")
+
+async def status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != admin_id: return
+    scanned = len(seen)
+    in_queue = len(ready_queue)
+    alerted = sum(1 for t in token_db.values() if t.get("alerted"))
+    last_seen = max(seen.values()) if seen else 0
+    mins_ago = int((time.time() - last_seen) / 60) if last_seen else 0
+    msg = f"*SCANNER STATUS*\\nSeen: `{scanned}`\\nQueue: `{in_queue}`\\nGOLD: `{alerted}`\\nLast: `{mins_ago}m ago`"
+    await update.message.reply_text(md(msg), parse_mode="MarkdownV2")
+
+async def test(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != admin_id: return
+    await broadcast_alert(
+        mint="J9BcrQfX4p9HzJ42sXg3vWn8x9b3v8p7q6r5t4y3u2w1",
+        sym="GOLDTEST",
+        fdv=2200,
+        age_min=1
+    )
+    await update.message.reply_text("Test GOLD sent!")
+
+# --------------------------------------------------------------------------- #
 #                               MAIN
 # --------------------------------------------------------------------------- #
 async def main():
@@ -454,9 +452,12 @@ async def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("menu", show_menu))
+    app.add_handler(CommandHandler("menu", lambda u, c: show_menu(u.effective_user.id)))
+    app.add_handler(CommandHandler("trades", lambda u, c: show_live_trades(u.effective_user.id)))
+    app.add_handler(CommandHandler("connect", lambda u, c: u.message.reply_text("Send: `/connect <private_key>`", parse_mode="Markdown")))
     app.add_handler(CommandHandler("admin", admin))
-    app.add_handler(CommandHandler("connect", connect_wallet))
+    app.add_handler(CommandHandler("status", status))
+    app.add_handler(CommandHandler("test", test))
     app.add_handler(CallbackQueryHandler(button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
@@ -465,7 +466,7 @@ async def main():
     asyncio.create_task(premium_pump_scanner(app))
     asyncio.create_task(auto_save())
     asyncio.create_task(check_auto_sell())
-    log.info("ONION X v10.0 — FULL CODE — ADMIN AUTO-SET — LIVE")
+    log.info("ONION X v11.1 — FULL DEBUG — LIVE")
     await app.updater.start_polling()
     await asyncio.Event().wait()
 
