@@ -13,6 +13,8 @@ from dotenv import load_dotenv
 from cryptography.fernet import Fernet
 load_dotenv()
 
+import logging
+logging.basicConfig(level=logging.DEBUG)  # ← SEE EVERYTHING
 import aiohttp
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
@@ -391,6 +393,8 @@ async def get_new_pairs(sess):
             "params": [prog, {"filters": [{"memcmp": {"offset": 0, "bytes": "CREATE"}}]}]
         }
         resp = await rpc_post(payload)
+        log.debug(f"Checking program: {prog}")
+        log.debug(f"Found {len(resp.get('result', []))} accounts")
         if not resp: continue
         for acc in resp.get("result", []):
             mint = acc["account"]["data"][8:40]
@@ -462,6 +466,17 @@ async def premium_pump_scanner():
     finally:
         if sess: await sess.close()
 
+# --------------------------------------------------------------------------- #
+# SAFE EDIT (PREVENT CRASH ON EDIT)
+# --------------------------------------------------------------------------- #
+async def safe_edit(query, text, reply_markup=None):
+    try:
+        if query.message.text == text:
+            return
+        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        if "not modified" not in str(e).lower():
+            log.error(f"Edit failed: {e}")
 # --------------------------------------------------------------------------- #
 # ALERTS
 # --------------------------------------------------------------------------- #
