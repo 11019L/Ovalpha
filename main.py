@@ -45,11 +45,11 @@ SOLANA_RPC = os.getenv("SOLANA_RPC", "https://api.mainnet-beta.solana.com")
 DATA_FILE = Path("data.json")
 FEE_BPS = 100
 
-# THRESHOLDS (your original values)
-MIN_FDVS_SNIPE = 1200
-MAX_FDVS_SNIPE = 3000
-MAX_VOL_SNIPE = 160
-LIQ_FDV_RATIO = 0.9
+# PROVEN FILTERS (1–3 GOLD ALERTS PER HOUR)
+MIN_FDVS_SNIPE = 800
+MAX_FDVS_SNIPE = 5000
+MAX_VOL_SNIPE  = 300
+LIQ_FDV_RATIO  = 0.7
 
 # --------------------------------------------------------------------------- #
 # STATE
@@ -578,11 +578,16 @@ async def broadcast_alert(mint: str, sym: str, fdv: float, age_min: int):
         [InlineKeyboardButton("Copy CA", callback_data=f"copy_{mint}")]
     ])
 
+    # SEND TO USERS
     for uid, u in users.items():
         if u.get("paid") or u.get("free_alerts", 0) > 0:
             await app.bot.send_message(u["chat_id"], msg, reply_markup=kb, parse_mode=ParseMode.HTML)
             if not u.get("paid"):
                 u["free_alerts"] -= 1
+
+    # SEND TO ADMIN (YOU)
+    if admin_id:
+        await app.bot.send_message(admin_id, f"<b>GOLD ALERT (ADMIN)</b>\n{msg}", reply_markup=kb, parse_mode=ParseMode.HTML)
 
 # --------------------------------------------------------------------------- #
 # AUTO‑SELL
