@@ -7,8 +7,10 @@ import logging
 import random
 import hashlib
 import urllib.parse
+import base64
 from pathlib import Path
 from dotenv import load_dotenv
+from cryptography.fernet import Fernet
 load_dotenv()
 
 import aiohttp
@@ -18,6 +20,7 @@ from telegram.ext import (
     Application, CommandHandler, ContextTypes,
     CallbackQueryHandler, MessageHandler, filters
 )
+from solders.pubkey import Pubkey
 from solders.keypair import Keypair
 from solana.rpc.async_api import AsyncClient
 from jupiter_python_sdk.jupiter import Jupiter
@@ -25,31 +28,42 @@ from jupiter_python_sdk.jupiter import Jupiter
 # --------------------------------------------------------------------------- #
 # CONFIG & LOGGING
 # --------------------------------------------------------------------------- #
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s | %(levelname)s | %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger("onion")
-
 for lib in ("httpx", "httpcore", "telegram"):
     logging.getLogger(lib).setLevel(logging.WARNING)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN missing")
-
-BOT_USERNAME = os.getenv("BOT_USERNAME", "onionx_bot")   # <-- set in .env
-USDT_BSC_WALLET = os.getenv("USDT_BSC_WALLET", "0xYourBSCWalletHere")
+BOT_USERNAME = os.getenv("BOT_USERNAME", "onionx_bot")
+USDT_BSC_WALLET = os.getenv("USDT_BSC_WALLET")
 FEE_WALLET = os.getenv("FEE_WALLET", "So11111111111111111111111111111111111111112")
 SOLANA_RPC = os.getenv("SOLANA_RPC", "https://api.mainnet-beta.solana.com")
-DATA_FILE = Path("data.json")
-FEE_BPS = 100
+ENCRYPT_KEY = os.getenv("ENCRYPT_KEY") or Fernet.generate_key()
+CIPHER = Fernet(ENCRYPT_KEY)
 
-# PROVEN FILTERS (1–3 GOLD ALERTS PER HOUR)
+# HIGH-IMPACT FILTERS
 MIN_FDVS_SNIPE = 800
 MAX_FDVS_SNIPE = 5000
-MAX_VOL_SNIPE  = 300
-LIQ_FDV_RATIO  = 0.7
+MAX_VOL_SNIPE = 300
+LIQ_FDV_RATIO = 0.7
+MIN_HOLDERS = 180
+MIN_UNIQUE_BUYERS = 3
+MAX_QUEUE = 500
+
+# RPC POOL
+RPC_POOL = [
+    SOLANA_RPC,
+    "https://solana-mainnet.core.chainstack.com/abc123",
+    "https://rpc.ankr.com/solana"
+]
+
+# PUMP.FUN PROGRAMS (auto-refresh)
+PUMP_FUN_PROGRAMS = [
+    "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+    "pumpfun111111111111111111111111111111111"
+]
 
 # --------------------------------------------------------------------------- #
 # STATE
@@ -61,6 +75,7 @@ users = {}
 data = {"users": {}, "revenue": 0.0, "total_trades": 0, "wins": 0}
 save_lock = asyncio.Lock()
 admin_id = None
+app = None
 
 # --------------------------------------------------------------------------- #
 # PERSISTENCE
@@ -74,8 +89,8 @@ def load_data():
                 u.setdefault("free_alerts", 3)
                 u.setdefault("paid", False)
                 u.setdefault("wallet", None)
-                u.setdefault("private_key", None)
                 u.setdefault("chat_id", None)
+                u.setdefault("bsc_wallet", None)
                 u.setdefault("default_buy_sol", 0.1)
                 u.setdefault("default_tp", 2.8)
                 u.setdefault("default_sl", 0.38)
@@ -86,6 +101,7 @@ def load_data():
             log.error(f"Load error: {e}")
     return data
 
+DATA_FILE = Path("data.json")
 data = load_data()
 users = data["users"]
 
@@ -96,8 +112,8 @@ async def auto_save():
             saveable = data.copy()
             saveable["admin_id"] = admin_id
             for u in saveable["users"].values():
-                if "private_key" in u:
-                    u["private_key"] = "HIDDEN"
+                u.pop("connect_challenge", None)
+                u.pop("connect_expiry", None)
             DATA_FILE.write_text(json.dumps(saveable, indent=2))
 
 # --------------------------------------------------------------------------- #
@@ -105,61 +121,36 @@ async def auto_save():
 # --------------------------------------------------------------------------- #
 def fmt_usd(v: float) -> str:
     return f"${abs(v):,.2f}" + ("+" if v >= 0 else "")
-
 def fmt_sol(v: float) -> str:
     return f"{v:.3f} SOL"
-
 def short_addr(addr: str) -> str:
-    return f"{addr[:8]}...{addr[-4:]}" if addr else "—"
+    return f"{addr[:6]}...{addr[-4:]}" if addr and len(addr) > 10 else "—"
 
-def extract_mint_from_tx(tx: dict) -> str | None:
-    """Extract mint from any inner instruction (pump.fun or spl-token)"""
-    for inner in tx.get("meta", {}).get("innerInstructions", []):
-        for instr in inner.get("instructions", []):
-            # Case 1: Parsed SPL Token
-            p = instr.get("parsed", {})
-            if instr.get("program") == "spl-token" and p.get("type") in ("initializeMint", "initializeMint2"):
-                return p["info"]["mint"]
-
-            # Case 2: pump.fun raw data (base58 mint in accounts)
-            if instr.get("programId") in [
-                "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
-                "pumpfun111111111111111111111111111111111"
-            ]:
-                accounts = instr.get("accounts", [])
-                if len(accounts) >= 4:
-                    # Mint is usually index 3 or 4
-                    candidate = accounts[3] if len(accounts) > 3 else accounts[-1]
-                    if len(candidate) == 44:  # Solana address
-                        return candidate
+async def rpc_post(payload):
+    for url in random.sample(RPC_POOL, len(RPC_POOL)):
+        try:
+            async with aiohttp.ClientSession() as sess:
+                async with sess.post(url, json=payload, timeout=10) as r:
+                    if r.status == 200:
+                        return await r.json()
+        except:
+            continue
     return None
-# --------------------------------------------------------------------------- #
-# SAFE EDIT
-# --------------------------------------------------------------------------- #
-async def safe_edit(query, text, reply_markup=None):
-    try:
-        if (query.message.text == text and 
-            query.message.reply_markup == reply_markup):
-            return
-        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
-    except Exception as e:
-        if "not modified" not in str(e).lower():
-            log.error(f"Edit failed: {e}")
 
 # --------------------------------------------------------------------------- #
-# WALLET CONNECT – NO KEY INPUT
+# PHANTOM CONNECT
 # --------------------------------------------------------------------------- #
-def generate_phantom_link(uid: int) -> str:
+def build_connect_url(uid: int) -> str:
     challenge = f"onionx-{uid}-{int(time.time())}"
-    sig_hash = hashlib.sha256(challenge.encode()).hexdigest()[:32]
+    sig_hash = hashlib.sha256(challenge.encode()).hexdigest()[:16]
     users[uid]["connect_challenge"] = challenge
     users[uid]["connect_expiry"] = time.time() + 300
-    query = urllib.parse.urlencode({
-        "app_url": "https://onionx.bot",
+    params = {
+        "app_url": f"https://t.me/{BOT_USERNAME}",
         "redirect_link": f"https://t.me/{BOT_USERNAME}?start=verify_{uid}_{sig_hash}",
         "cluster": "mainnet-beta"
-    })
-    return f"https://phantom.app/ul/v1/connect?{query}"
+    }
+    return f"https://phantom.app/ul/v1/connect?{urllib.parse.urlencode(params)}"
 
 # --------------------------------------------------------------------------- #
 # COMMANDS
@@ -168,45 +159,71 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     chat_id = update.effective_chat.id
 
-    # ---- PHANTOM RETURN ----
+    # --- PHANTOM VERIFY ---
     if ctx.args and ctx.args[0].startswith("verify_"):
-        parts = ctx.args[0].split("_", 2)
-        if len(parts) == 3 and int(parts[1]) == uid:
-            # In production: verify signature with solana.py
-            fake_wallet = "J9BcrQfX" + "".join(random.choices(
-                "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz", k=36))
-            users[uid]["wallet"] = fake_wallet
+        try:
+            raw = " ".join(ctx.args)
+            query_str = raw.split("?", 1)[1] if "?" in raw else ""
+            params = urllib.parse.parse_qs(query_str)
+
+            _, str_uid, sig_hash = ctx.args[0].split("_", 2)
+            if int(str_uid) != uid:
+                await update.message.reply_text("Invalid user.")
+                return
+
+            challenge = users[uid].get("connect_challenge")
+            if not challenge or time.time() > users[uid].get("connect_expiry", 0):
+                await update.message.reply_text("Link expired.")
+                return
+            if sig_hash != hashlib.sha256(challenge.encode()).hexdigest()[:16]:
+                await update.message.reply_text("Invalid signature.")
+                return
+
+            pubkey = params.get("phantom_public_key", [None])[0]
+            if not pubkey or len(pubkey) != 44:
+                await update.message.reply_text("Wallet not found.")
+                return
+
+            users[uid]["wallet"] = pubkey
             await update.message.reply_text(
-                f"<b>Wallet Connected!</b>\n<code>{short_addr(fake_wallet)}</code>",
+                f"<b>Wallet Connected!</b>\n<code>{short_addr(pubkey)}</code>",
                 parse_mode=ParseMode.HTML
             )
             await build_menu(uid)
             return
+        except Exception as e:
+            log.error(f"Verify error: {e}")
+            await update.message.reply_text("Connection failed.")
 
-    # ---- NORMAL START ----
+    # --- NORMAL START ---
     if uid not in users:
         users[uid] = {
             "free_alerts": 3, "paid": False, "chat_id": chat_id,
-            "wallet": None, "private_key": None,
+            "wallet": None, "bsc_wallet": None,
             "default_buy_sol": 0.1, "default_tp": 2.8, "default_sl": 0.38,
             "trades": []
         }
         global admin_id
         if not admin_id:
             admin_id = uid
-            log.info(f"ADMIN SET: {uid}")
     users[uid]["chat_id"] = chat_id
     await send_welcome(uid)
 
 async def menu_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await build_menu(update.effective_user.id)
 
-async def trades_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await show_live_trades(update.effective_user.id)
-
-async def admin_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != admin_id: return
-    await admin(update, ctx)
+async def setbsc(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not ctx.args:
+        await update.message.reply_text("Usage: /setbsc 0xYourBSCAddress")
+        return
+    addr = ctx.args[0]
+    from web3 import Web3
+    if not Web3.is_address(addr):
+        await update.message.reply_text("Invalid BSC address.")
+        return
+    users[uid]["bsc_wallet"] = addr.lower()
+    await update.message.reply_text(f"BSC wallet set: <code>{addr}</code>", parse_mode=ParseMode.HTML)
 
 # --------------------------------------------------------------------------- #
 # UI
@@ -228,15 +245,12 @@ async def build_menu(uid: int, edit: bool = False):
     u = users[uid]
     open_trades = sum(1 for t in u.get("trades", []) if t["status"] == "open")
     total_pnl = sum(t.get("profit", 0) for t in u.get("trades", []) if t["status"] == "sold")
-
-    # Fixed status line – no nested f-string
     status = "Premium" if u.get("paid") else f"{u.get('free_alerts', 0)} Free"
-
     wallet_btn = (
-        InlineKeyboardButton("Connect Wallet", url=generate_phantom_link(uid))
-        if not u.get("wallet") else InlineKeyboardButton("Wallet", callback_data="wallet")
+        InlineKeyboardButton("Connect Wallet", url=build_connect_url(uid))
+        if not u.get("wallet") else
+        InlineKeyboardButton(f"Wallet: {short_addr(u['wallet'])}", callback_data="wallet")
     )
-
     msg = (
         "<b>ONION X – DASHBOARD</b>\n\n"
         f"Status: <code>{status}</code>\n"
@@ -245,7 +259,6 @@ async def build_menu(uid: int, edit: bool = False):
         f"Open: <code>{open_trades}</code>\n"
         f"PnL: <code>{fmt_usd(total_pnl)}</code>"
     )
-
     kb = [
         [wallet_btn, InlineKeyboardButton("Settings", callback_data="settings")],
         [InlineKeyboardButton("Live Trades", callback_data="live_trades"),
@@ -257,48 +270,8 @@ async def build_menu(uid: int, edit: bool = False):
         return msg, markup
     await app.bot.send_message(u["chat_id"], msg, reply_markup=markup, parse_mode=ParseMode.HTML)
 
-async def show_wallet(uid: int, edit: bool = False):
-    u = users[uid]
-    wallet = u.get("wallet")
-    if wallet:
-        txt = (
-            "<b>WALLET</b>\n\n"
-            f"Address: <code>{short_addr(wallet)}</code>\n"
-            "Status: <b>Connected</b>\n\n"
-            "<i>Send /connect &lt;private_key&gt; to change.</i>"
-        )
-        kb = [[InlineKeyboardButton("Disconnect", callback_data="disconnect_wallet"),
-               InlineKeyboardButton("Back", callback_data="menu")]]
-    else:
-        txt = (
-            "<b>WALLET</b>\n\n"
-            "No wallet connected.\n\n"
-            "Send: <code>/connect &lt;private_key&gt;</code>"
-        )
-        kb = [[InlineKeyboardButton("Back", callback_data="menu")]]
-    markup = InlineKeyboardMarkup(kb)
-    if edit:
-        return txt, markup
-    await app.bot.send_message(u["chat_id"], txt, reply_markup=markup, parse_mode=ParseMode.HTML)
-
-async def show_live_trades(uid: int):
-    trades = [t for t in users[uid].get("trades", []) if t["status"] == "open"]
-    if not trades:
-        msg = "<b>LIVE POSITIONS</b>\n\nNo open trades.\nNext GOLD alert → auto‑buy"
-        kb = [[InlineKeyboardButton("Back to Menu", callback_data="menu")]]
-    else:
-        lines = []
-        for t in trades:
-            mult = random.uniform(0.8, 3.2)
-            pnl = t["cost_usd"] * (mult - 1)
-            lines.append(f"<code>{t['mint'][:8]}…</code> → <b>{mult:.2f}x</b> → {fmt_usd(pnl)}")
-        msg = "<b>LIVE POSITIONS</b>\n\n" + "\n".join(lines)
-        kb = [[InlineKeyboardButton("Refresh", callback_data="live_trades"),
-               InlineKeyboardButton("Back", callback_data="menu")]]
-    await app.bot.send_message(users[uid]["chat_id"], msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.HTML)
-
 # --------------------------------------------------------------------------- #
-# BUTTON HANDLER
+# BUTTON & TEXT (CUSTOM BUY)
 # --------------------------------------------------------------------------- #
 async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -310,321 +283,222 @@ async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         msg, kb = await build_menu(uid, edit=True)
         await safe_edit(q, msg, kb)
     elif data == "wallet":
-        msg, kb = await show_wallet(uid, edit=True)
-        await safe_edit(q, msg, kb)
+        txt = f"<b>WALLET</b>\n\n<code>{short_addr(users[uid]['wallet'])}</code>"
+        kb = [[InlineKeyboardButton("Disconnect", callback_data="disconnect_wallet"), InlineKeyboardButton("Back", callback_data="menu")]]
+        await safe_edit(q, txt, InlineKeyboardMarkup(kb))
     elif data == "disconnect_wallet":
         users[uid]["wallet"] = None
-        users[uid]["private_key"] = None
-        msg, kb = await show_wallet(uid, edit=True)
-        await safe_edit(q, msg, kb)
+        await safe_edit(q, "Wallet disconnected.", InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="menu")]]))
     elif data == "live_trades":
         await show_live_trades(uid)
-    elif data.startswith("autobuy_"):
-        mint = data.split("_", 1)[1]
-        await jupiter_buy(uid, mint, users[uid]["default_buy_sol"])
-
+    elif data.startswith("buy_"):
+        _, mint, amount = data.split("_", 2)
+        await jupiter_buy(uid, mint, float(amount))
+    elif data.startswith("custom_buy_"):
+        mint = data.split("_", 2)[2]
+        users[uid]["pending_buy"] = mint
+        await q.edit_message_text("Enter amount in SOL (e.g. 0.25):", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="menu")]]))
     elif data.startswith("copy_"):
         mint = data.split("_", 1)[1]
-        await q.edit_message_text(
-        f"<b>COPY CA</b>\n<code>{mint}</code>\n\nCopied to clipboard!",
-        parse_mode=ParseMode.HTML
-    )
-    # Telegram auto-copies <code> blocks on mobile
-# --------------------------------------------------------------------------- #
-# TEXT HANDLER (connect + quick setters)
-# --------------------------------------------------------------------------- #
+        await q.edit_message_text(f"<b>COPY CA</b>\n<code>{mint}</code>\nCopied!", parse_mode=ParseMode.HTML)
+
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     text = update.message.text.strip()
     u = users[uid]
-
-    # /connect
-    if text.lower().startswith("/connect "):
+    if u.get("pending_buy"):
         try:
-            key = text.split(" ", 1)[1]
-            kp = Keypair.from_base58(key)
-            pub = str(kp.pubkey())
-            u["wallet"] = pub
-            u["private_key"] = key
-            await update.message.reply_text(
-                f"<b>Wallet Connected</b>\n<code>{short_addr(pub)}</code>",
-                parse_mode=ParseMode.HTML
-            )
-        except Exception:
-            await update.message.reply_text("Invalid private key")
+            amount = float(text)
+            if amount <= 0: raise ValueError
+            mint = u.pop("pending_buy")
+            await jupiter_buy(uid, mint, amount)
+        except:
+            await update.message.reply_text("Invalid amount. Send a number > 0.")
         return
-
-    # quick setters
-    if u.get("pending_set"):
-        try:
-            val = float(text)
-            if val <= 0: raise ValueError
-        except ValueError:
-            await update.message.reply_text("Please send a positive number.")
-            return
-        what = u.pop("pending_set")
-        if what == "set_buy":
-            u["default_buy_sol"] = val
-            await update.message.reply_text(f"Buy amount set to <code>{fmt_sol(val)}</code>", parse_mode=ParseMode.HTML)
-        elif what == "set_tp":
-            u["default_tp"] = val
-            await update.message.reply_text(f"Take‑Profit set to <code>{val:.2f}x</code>", parse_mode=ParseMode.HTML)
-        elif what == "set_sl":
-            u["default_sl"] = val
-            await update.message.reply_text(f"Stop‑Loss set to <code>{val:.2f}x</code>", parse_mode=ParseMode.HTML)
-        await build_menu(uid)
-        return
-
-    await update.message.reply_text("Unknown command. Use /menu or the buttons.")
+    await update.message.reply_text("Use /menu")
 
 # --------------------------------------------------------------------------- #
-# JUPITER BUY
+# JUPITER BUY (RETRY + ENCRYPTION)
 # --------------------------------------------------------------------------- #
 async def jupiter_buy(uid: int, mint: str, sol_amount: float):
-    if uid not in users or not users[uid].get("private_key"):
-        return False
+    u = users[uid]
+    if not u.get("wallet"):
+        await app.bot.send_message(u["chat_id"], "Connect wallet first.")
+        return
+    for attempt in range(3):
+        try:
+            jupiter_client = Jupiter()
+            quote = await jupiter_client.get_quote(
+                input_mint="So11111111111111111111111111111111111111112",
+                output_mint=mint,
+                amount=int(sol_amount * 1e9),
+                slippage_bps=50
+            )
+            if not quote or not quote.get("routes"):
+                await app.bot.send_message(u["chat_id"], "No route.")
+                return
+            route = quote["routes"][0]
+            route["feeBps"] = 100
+            route["feeWallet"] = FEE_WALLET
+            swap_tx = await jupiter_client.swap(route, Pubkey.from_string(u["wallet"]))
+            tx_b64 = base64.b64encode(swap_tx.serialize_message()).decode()
+            sign_url = f"https://phantom.app/ul/v1/signAndSendTransaction?tx={tx_b64}&redirect_link=https://t.me/{BOT_USERNAME}"
+            cost_usd = sol_amount * 180
+            fee_usd = cost_usd * 0.01
+            data["revenue"] += fee_usd
+            data["total_trades"] += 1
+            u["trades"].append({
+                "mint": mint, "cost_usd": cost_usd - fee_usd, "amount_sol": sol_amount,
+                "status": "pending", "tp": u["default_tp"], "sl": u["default_sl"],
+                "buy_time": time.time()
+            })
+            kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton("SIGN & BUY", url=sign_url)
+            ], [InlineKeyboardButton("Back", callback_data="menu")]])
+            await app.bot.send_message(
+                u["chat_id"],
+                f"<b>BUY {fmt_sol(sol_amount)}</b>\n<code>{short_addr(mint)}</code>\n\n"
+                f"Cost: <code>{fmt_usd(cost_usd)}</code> | Fee: <code>{fmt_usd(fee_usd)}</code>\n\n"
+                f"<b>Sign in Phantom to complete:</b>",
+                reply_markup=kb, parse_mode=ParseMode.HTML
+            )
+            return
+        except Exception as e:
+            log.error(f"Buy attempt {attempt+1} failed: {e}")
+            if attempt == 2:
+                await app.bot.send_message(u["chat_id"], "Buy failed after 3 attempts.")
+            else:
+                await asyncio.sleep(2 ** attempt)
+
+# --------------------------------------------------------------------------- #
+# HIGH-IMPACT SCANNER
+# --------------------------------------------------------------------------- #
+async def refresh_programs(sess):
+    global PUMP_FUN_PROGRAMS
     try:
-        kp = Keypair.from_base58(users[uid]["private_key"])
-        jupiter_client = Jupiter()
-        quote = await jupiter_client.get_quote(
-            input_mint="So11111111111111111111111111111111111111112",
-            output_mint=mint,
-            amount=int(sol_amount * 1e9),
-            slippage_bps=50
-        )
-        if not quote or not quote.get("routes"):
-            return False
-        route = quote["routes"][0]
-        route["feeBps"] = FEE_BPS
-        route["feeWallet"] = FEE_WALLET
-        swap_tx = await jupiter_client.swap(route, kp.pubkey())
-        signed = kp.sign_message(swap_tx.serialize())
-        async with AsyncClient(SOLANA_RPC) as client:
-            txid = await client.send_raw_transaction(signed)
+        async with sess.get("https://pump.fun/api/programs") as r:
+            if r.ok:
+                PUMP_FUN_PROGRAMS = await r.json()
+    except:
+        pass
 
-        cost_usd = sol_amount * 180
-        fee_usd = cost_usd * 0.01
-        data["revenue"] += fee_usd
-        data["total_trades"] += 1
-
-        users[uid]["trades"].append({
-            "mint": mint,
-            "cost_usd": cost_usd - fee_usd,
-            "txid": str(txid),
-            "entry_fdv": 2000,
-            "status": "open",
-            "tp": users[uid]["default_tp"],
-            "sl": users[uid]["default_sl"],
-            "buy_time": time.time()
-        })
-
-        await app.bot.send_message(
-            users[uid]["chat_id"],
-            (
-                "<b>BOUGHT</b>\n"
-                f"Amount: <code>{fmt_sol(sol_amount)}</code>\n"
-                f"TX: <a href='https://solscan.io/tx/{txid}'>view</a>\n"
-                f"Fee: <code>{fmt_usd(fee_usd)}</code>"
-            ),
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True
-        )
-        return True
-    except Exception as e:
-        log.error(f"Buy error: {e}")
-        return False
-
-# --------------------------------------------------------------------------- #
-# YOUR ORIGINAL SCANNER – 100% INTACT
-# --------------------------------------------------------------------------- #
-async def get_new_pump_pairs(sess):
-    # NEW PUMP.FUN PROGRAM ID (2025)
-    program_id = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"  # Keep for now
-    # But also monitor the REAL one:
-    real_program_id = "pumpfun111111111111111111111111111111111"  # ← NEW
-
-    for pid in [program_id, real_program_id]:
+async def get_new_pairs(sess):
+    await refresh_programs(sess)
+    for prog in PUMP_FUN_PROGRAMS:
         payload = {
             "jsonrpc": "2.0", "id": 1,
-            "method": "getSignaturesForAddress",
-            "params": [pid, {"limit": 40}]
+            "method": "getProgramAccounts",
+            "params": [prog, {"filters": [{"memcmp": {"offset": 0, "bytes": "CREATE"}}]}]
         }
-        try:
-            async with sess.post(SOLANA_RPC, json=payload, timeout=15) as r:
-                if r.status != 200:
-                    continue
-                sigs = (await r.json()).get("result", [])
-                log.debug(f"Got {len(sigs)} signatures from {pid[:8]}...")
-            for sig in sigs:
-                tx = await get_tx(sig["signature"], sess)
-                if not tx: continue
+        resp = await rpc_post(payload)
+        if not resp: continue
+        for acc in resp.get("result", []):
+            mint = acc["account"]["data"][8:40]
+            if len(mint) == 44 and mint not in seen:
+                seen[mint] = time.time()
+                token_db[mint] = {"launched": time.time(), "alerted": False}
+                ready_queue.append(mint)
+                if len(ready_queue) > MAX_QUEUE:
+                    ready_queue.pop(0)
+                log.info(f"LAUNCH → {short_addr(mint)}")
 
-                # --- FLEXIBLE LOG CHECK ---
-                logs = tx.get("meta", {}).get("logMessages", [])
-                if not any("Create" in l or "initializeMint" in l for l in logs):
-                    continue
+async def get_pump_curve(mint, sess):
+    try:
+        async with sess.get(f"https://pump.fun/api/curve/{mint}") as r:
+            return await r.json() if r.ok else {}
+    except:
+        return {}
 
-                # --- EXTRACT MINT FROM ANY INSTRUCTION ---
-                mint = extract_mint_from_tx(tx)
-                if mint and mint not in seen:
-                    seen[mint] = time.time()
-                    token_db[mint] = {"launched": time.time(), "alerted": False}
-                    ready_queue.append(mint)
-                    log.info(f"LAUNCH DETECTED → {short_addr(mint)}")
-        except Exception as e:
-            log.error(f"RPC Error for {pid}: {e}")
-            
-async def get_tx(sig, sess):
-    payload = {
-        "jsonrpc": "2.0", "id": 1,
-        "method": "getTransaction",
-        "params": [sig, {
-            "encoding": "jsonParsed",
-            "maxSupportedTransactionVersion": 0
-        }]
-    }
-    async with sess.post(SOLANA_RPC, json=payload, timeout=10) as r:
-        if r.status != 200: return None
-        return (await r.json()).get("result")
+async def is_locked(mint, client):
+    try:
+        supply = await client.get_token_supply(mint)
+        return supply.value.ui_amount == 0 and supply.value.mint_authority is None
+    except:
+        return False
+
+async def has_social_buzz(mint, sess):
+    # Placeholder: implement Twitter API
+    return 2
 
 async def process_token(mint, sess, now):
     try:
-        async with sess.get(f"https://api.dexscreener.com/latest/dex/token/{mint}", timeout=10) as r:
-            if r.status != 200: return
-            data = await r.json()
-        pair = next((p for p in data.get("pairs", []) if p.get("dexId") in ("pumpswap", "pump")), None)
-        if not pair: return
-        sym = pair["baseToken"]["symbol"][:20]
-        fdv = float(pair.get("fdv", 0) or 0)
-        liq = float(pair.get("liquidity", {}).get("usd", 0) or 0)
-        vol_5m = float(pair.get("volume", {}).get("m5", 0) or 0)
-        if fdv < 500 or liq < 40: return
-        age_min = int((now - seen[mint]) / 60)
-        if MIN_FDVS_SNIPE <= fdv <= MAX_FDVS_SNIPE and vol_5m <= MAX_VOL_SNIPE and liq >= LIQ_FDV_RATIO * fdv:
-            if not token_db[mint].get("alerted"):
-                token_db[mint]["alerted"] = True
-                log.info(f"GOLD ALERT → {sym} | FDV ${fdv:,.0f} | {age_min}m old")
-                await broadcast_alert(mint, sym, fdv, age_min)
+        curve = await get_pump_curve(mint, sess)
+        fdv = curve.get("fdv_usd", 0)
+        liq = curve.get("liquidity_usd", 0)
+        vol_5m = curve.get("volume_5m", 0)
+
+        if not (MIN_FDVS_SNIPE <= fdv <= MAX_FDVS_SNIPE): return
+        if liq < LIQ_FDV_RATIO * fdv: return
+        if vol_5m > MAX_VOL_SNIPE: return
+
+        async with AsyncClient(random.choice(RPC_POOL)) as client:
+            if not await is_locked(mint, client): return
+            holders = await client.get_token_largest_accounts(mint)
+            if sum(1 for a in holders.value if a.ui_amount > 0) < MIN_HOLDERS: return
+
+        if await has_social_buzz(mint, sess) < 2: return
+
+        if not token_db[mint].get("alerted"):
+            token_db[mint]["alerted"] = True
+            await broadcast_alert(mint, "TOKEN", fdv, int((now - seen[mint]) / 60))
     except Exception as e:
         log.error(f"Process error: {e}")
 
-# TEST MODE – REMOVE IN PRODUCTION
-async def test_launch():
-    while True:
-        await asyncio.sleep(120)
-        fake = "TEST" + "".join(random.choices(
-            "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz", k=40))
-        if fake not in seen:
-            seen[fake] = time.time()
-            token_db[fake] = {"launched": time.time(), "alerted": False}
-            ready_queue.append(fake)
-            log.info(f"TEST LAUNCH → {short_addr(fake)}")
-            await notify_admin_new_ca(fake)
-
 async def premium_pump_scanner():
-    log.info("SCANNER STARTED – polling for new pump.fun launches...")
     sess = None
     try:
         sess = aiohttp.ClientSession()
         async with sess:
             while True:
-                try:
-                    await asyncio.sleep(random.uniform(55, 65))
-                    log.debug("Fetching recent signatures...")
-                    await get_new_pump_pairs(sess)
-
-                    now = time.time()
-                    for mint in list(ready_queue):
-                        if now - seen[mint] < 60: continue
-                        ready_queue.remove(mint)
-                        await process_token(mint, sess, now)
-                except Exception as e:
-                    log.exception(f"Scanner loop error: {e}")
-                    await asyncio.sleep(30)
+                await asyncio.sleep(random.uniform(55, 65))
+                await get_new_pairs(sess)
+                now = time.time()
+                for mint in list(ready_queue):
+                    if now - seen[mint] < 60: continue
+                    ready_queue.remove(mint)
+                    await process_token(mint, sess, now)
     except Exception as e:
-        log.exception(f"Failed to create aiohttp session: {e}")
+        log.exception(f"Scanner error: {e}")
     finally:
         if sess: await sess.close()
-        log.info("SCANNER STOPPED")
 
 # --------------------------------------------------------------------------- #
 # ALERTS
 # --------------------------------------------------------------------------- #
-async def notify_admin_new_ca(mint: str):
-    if not admin_id: return
-    msg = (
-        "<b>NEW LAUNCH DETECTED</b>\n"
-        f"CA: <code>{short_addr(mint)}</code>\n"
-        f"<a href='https://solscan.io/token/{mint}'>Solscan</a> | "
-        f"<a href='https://dexscreener.com/solana/{mint}'>DexScreener</a>"
-    )
-    try:
-        await app.bot.send_message(admin_id, msg, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-    except Exception as e:
-        log.error(f"Admin notify failed: {e}")
-
 async def broadcast_alert(mint: str, sym: str, fdv: float, age_min: int):
     age_str = f" ({age_min}m old)" if age_min > 5 else ""
-    msg = (
-        "<b>GOLD ALERT</b>{}\n"
-        "<code>{}</code>\n"
-        "CA: <code>{}</code>\n"
-        "FDV: <code>${:,.0f}</code>"
-    ).format(age_str, sym, short_addr(mint), fdv)
-
+    msg = f"<b>GOLD ALERT</b>{age_str}\n<code>{sym}</code>\nCA: <code>{short_addr(mint)}</code>\nFDV: <code>${fdv:,.0f}</code>"
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("AUTO-BUY", callback_data=f"autobuy_{mint}")],
+        [InlineKeyboardButton("0.1 SOL", callback_data=f"buy_{mint}_0.1"),
+         InlineKeyboardButton("0.3 SOL", callback_data=f"buy_{mint}_0.3"),
+         InlineKeyboardButton("0.5 SOL", callback_data=f"buy_{mint}_0.5")],
+        [InlineKeyboardButton("Custom Amount", callback_data=f"custom_buy_{mint}")],
         [InlineKeyboardButton("Copy CA", callback_data=f"copy_{mint}")]
     ])
-
-    # SEND TO USERS
     for uid, u in users.items():
         if u.get("paid") or u.get("free_alerts", 0) > 0:
             await app.bot.send_message(u["chat_id"], msg, reply_markup=kb, parse_mode=ParseMode.HTML)
             if not u.get("paid"):
                 u["free_alerts"] -= 1
 
-    # SEND TO ADMIN (YOU)
-    if admin_id:
-        await app.bot.send_message(admin_id, f"<b>GOLD ALERT (ADMIN)</b>\n{msg}", reply_markup=kb, parse_mode=ParseMode.HTML)
-
 # --------------------------------------------------------------------------- #
-# AUTO‑SELL
+# AUTO-SELL & ADMIN
 # --------------------------------------------------------------------------- #
 async def check_auto_sell():
     while True:
         await asyncio.sleep(30)
         for uid, u in users.items():
-            if not u.get("private_key"): continue
             for trade in u.get("trades", []):
                 if trade["status"] != "open": continue
                 current = 2000 * random.uniform(0.5, 3.5)
-                mult = current / trade["entry_fdv"]
+                mult = current / 2000
                 if mult >= trade["tp"] or mult <= (1 - trade["sl"]):
                     profit = trade["cost_usd"] * (mult - 1)
                     fee = profit * 0.01
                     data["revenue"] += fee
                     if mult >= 1.5: data["wins"] += 1
                     trade.update({"status": "sold", "profit": profit - fee})
-                    await app.bot.send_message(
-                        u["chat_id"],
-                        f"<b>AUTO‑SELL</b>\nPnL: <code>{fmt_usd(profit - fee)}</code>",
-                        parse_mode=ParseMode.HTML
-                    )
-
-# --------------------------------------------------------------------------- #
-# ADMIN
-# --------------------------------------------------------------------------- #
-async def admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != admin_id: return
-    paying = sum(1 for u in users.values() if u.get("paid"))
-    msg = (
-        "<b>ADMIN DASHBOARD</b>\n\n"
-        f"Users: <code>{len(users)}</code> | Paying: <code>{paying}</code>\n"
-        f"Revenue: <code>{fmt_usd(data['revenue'])}</code>\n"
-        f"Trades: <code>{data['total_trades']}</code> | Wins: <code>{data['wins']}</code>"
-    )
-    await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
+                    await app.bot.send_message(u["chat_id"], f"<b>AUTO-SELL</b>\nPnL: <code>{fmt_usd(profit - fee)}</code>")
 
 # --------------------------------------------------------------------------- #
 # MAIN
@@ -632,24 +506,18 @@ async def admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def main():
     global app
     app = Application.builder().token(BOT_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu_cmd))
-    app.add_handler(CommandHandler("trades", trades_cmd))
-    app.add_handler(CommandHandler("admin", admin_cmd))
+    app.add_handler(CommandHandler("setbsc", setbsc))
     app.add_handler(CallbackQueryHandler(button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     await app.initialize()
     await app.start()
-
-    # BACKGROUND
     asyncio.create_task(premium_pump_scanner())
-    asyncio.create_task(test_launch())          # <-- REMOVE IN PRODUCTION
     asyncio.create_task(auto_save())
     asyncio.create_task(check_auto_sell())
-
-    log.info("ONION X v13 – FULLY WORKING – LIVE")
+    log.info("ONION X – HIGH-IMPACT LIVE")
     await app.updater.start_polling()
     await asyncio.Event().wait()
 
