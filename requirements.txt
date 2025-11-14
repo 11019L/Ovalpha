@@ -3,3 +3,4 @@ aiohttp
 jupiter-python-sdk
 solders
 python-dotenv
+cryptography
