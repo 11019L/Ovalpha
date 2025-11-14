@@ -471,7 +471,6 @@ async def get_new_pump_pairs(sess):
                     token_db[mint] = {"launched": time.time(), "alerted": False}
                     ready_queue.append(mint)
                     log.info(f"LAUNCH DETECTED → {short_addr(mint)}")
-                    await notify_admin_new_ca(mint)
         except Exception as e:
             log.error(f"RPC Error for {pid}: {e}")
             
