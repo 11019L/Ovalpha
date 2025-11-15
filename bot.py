@@ -328,6 +328,20 @@ async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await safe_edit(q, "Wallet disconnected.", InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="menu")]]))
     elif data == "live_trades":
         await show_live_trades(uid)
+    elif data == "settings":
+        await show_settings(uid)
+    elif data.startswith("set_buy_"):
+        amount = float(data.split("_")[2])
+        users[uid]["default_buy_sol"] = amount
+        await show_settings(uid)
+    elif data.startswith("set_tp_"):
+        tp = float(data.split("_")[2])
+        users[uid]["default_tp"] = tp
+        await show_settings(uid)
+    elif data.startswith("set_sl_"):
+        sl = float(data.split("_")[2])
+        users[uid]["default_sl"] = sl
+        await show_settings(uid)
     elif data.startswith("buy_"):
         _, mint, amount = data.split("_", 2)
         await jupiter_buy(uid, mint, float(amount))
@@ -338,36 +352,6 @@ async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("copy_"):
         mint = data.split("_", 1)[1]
         await q.edit_message_text(f"<b>COPY CA</b>\n<code>{mint}</code>\nCopied!", parse_mode=ParseMode.HTML)
-        
-async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    text = update.message.text.strip()
-    u = users[uid]
-    if u.get("pending_buy"):
-        try:
-            amount = float(text)
-            if amount <= 0: raise ValueError
-            mint = u.pop("pending_buy")
-            await jupiter_buy(uid, mint, amount)
-        except:
-            await update.message.reply_text("Invalid amount. Send a number > 0.")
-        return
-    await update.message.reply_text("Use /menu")
-
-elif data == "settings":
-    await show_settings(uid)
-elif data.startswith("set_buy_"):
-    amount = float(data.split("_")[2])
-    users[uid]["default_buy_sol"] = amount
-    await show_settings(uid)
-elif data.startswith("set_tp_"):
-    tp = float(data.split("_")[2])
-    users[uid]["default_tp"] = tp
-    await show_settings(uid)
-elif data.startswith("set_sl_"):
-    sl = float(data.split("_")[2])
-    users[uid]["default_sl"] = sl
-    await show_settings(uid)
 # --------------------------------------------------------------------------- #
 # JUPITER BUY (RETRY + ENCRYPTION)
 # --------------------------------------------------------------------------- #
