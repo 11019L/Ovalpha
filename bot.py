@@ -284,6 +284,29 @@ async def show_live_trades(uid: int):
         msg = "<b>LIVE POSITIONS</b>\n\n" + "\n".join(lines)
     kb = [[InlineKeyboardButton("Back", callback_data="menu")]]
     await app.bot.send_message(users[uid]["chat_id"], msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.HTML)
+
+async def show_settings(uid: int):
+    u = users[uid]
+    msg = (
+        "<b>SETTINGS</b>\n\n"
+        f"Buy Amount: <code>{fmt_sol(u['default_buy_sol'])}</code>\n"
+        f"Take Profit: <code>{u['default_tp']}x</code>\n"
+        f"Stop Loss: <code>{u['default_sl']}x</code>\n"
+        f"Slippage: <code>50 bps</code>"
+    )
+    kb = [
+        [InlineKeyboardButton("Buy: 0.1", callback_data="set_buy_0.1"),
+         InlineKeyboardButton("0.3", callback_data="set_buy_0.3"),
+         InlineKeyboardButton("0.5", callback_data="set_buy_0.5")],
+        [InlineKeyboardButton("TP: 2x", callback_data="set_tp_2.0"),
+         InlineKeyboardButton("2.8x", callback_data="set_tp_2.8"),
+         InlineKeyboardButton("5x", callback_data="set_tp_5.0")],
+        [InlineKeyboardButton("SL: 30%", callback_data="set_sl_0.3"),
+         InlineKeyboardButton("38%", callback_data="set_sl_0.38"),
+         InlineKeyboardButton("50%", callback_data="set_sl_0.5")],
+        [InlineKeyboardButton("Back", callback_data="menu")]
+    ]
+    await app.bot.send_message(u["chat_id"], msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.HTML)
 # --------------------------------------------------------------------------- #
 # BUTTON & TEXT (CUSTOM BUY)
 # --------------------------------------------------------------------------- #
@@ -331,6 +354,20 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text("Use /menu")
 
+elif data == "settings":
+    await show_settings(uid)
+elif data.startswith("set_buy_"):
+    amount = float(data.split("_")[2])
+    users[uid]["default_buy_sol"] = amount
+    await show_settings(uid)
+elif data.startswith("set_tp_"):
+    tp = float(data.split("_")[2])
+    users[uid]["default_tp"] = tp
+    await show_settings(uid)
+elif data.startswith("set_sl_"):
+    sl = float(data.split("_")[2])
+    users[uid]["default_sl"] = sl
+    await show_settings(uid)
 # --------------------------------------------------------------------------- #
 # JUPITER BUY (RETRY + ENCRYPTION)
 # --------------------------------------------------------------------------- #
