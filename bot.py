@@ -273,6 +273,18 @@ async def build_menu(uid: int, edit: bool = False):
     await app.bot.send_message(u["chat_id"], msg, reply_markup=markup, parse_mode=ParseMode.HTML)
 
 # --------------------------------------------------------------------------- #
+# LIVE TRADES (WAS MISSING — NOW ADDED)
+# --------------------------------------------------------------------------- #
+async def show_live_trades(uid: int):
+    trades = [t for t in users[uid].get("trades", []) if t["status"] == "open"]
+    if not trades:
+        msg = "<b>LIVE POSITIONS</b>\n\nNo open trades."
+    else:
+        lines = [f"<code>{t['mint'][:8]}…</code> → {t['amount_sol']} SOL" for t in trades]
+        msg = "<b>LIVE POSITIONS</b>\n\n" + "\n".join(lines)
+    kb = [[InlineKeyboardButton("Back", callback_data="menu")]]
+    await app.bot.send_message(users[uid]["chat_id"], msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.HTML)
+# --------------------------------------------------------------------------- #
 # BUTTON & TEXT (CUSTOM BUY)
 # --------------------------------------------------------------------------- #
 async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -303,7 +315,7 @@ async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("copy_"):
         mint = data.split("_", 1)[1]
         await q.edit_message_text(f"<b>COPY CA</b>\n<code>{mint}</code>\nCopied!", parse_mode=ParseMode.HTML)
-
+        
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     text = update.message.text.strip()
@@ -385,26 +397,51 @@ async def refresh_programs(sess):
         pass
 
 async def get_new_pairs(sess):
-    await refresh_programs(sess)
-    for prog in PUMP_FUN_PROGRAMS:
-        payload = {
-            "jsonrpc": "2.0", "id": 1,
-            "method": "getProgramAccounts",
-            "params": [prog, {"filters": [{"memcmp": {"offset": 0, "bytes": "CREATE"}}]}]
-        }
-        resp = await rpc_post(payload)
-        log.debug(f"Checking program: {prog}")
-        log.debug(f"Found {len(resp.get('result', []))} accounts")
-        if not resp: continue
-        for acc in resp.get("result", []):
-            mint = acc["account"]["data"][8:40]
-            if len(mint) == 44 and mint not in seen:
+    program_id = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+    payload = {
+        "jsonrpc": "2.0", "id": 1,
+        "method": "getSignaturesForAddress",
+        "params": [program_id, {"limit": 40}]
+    }
+    try:
+        async with sess.post(SOLANA_RPC, json=payload, timeout=15) as r:
+            if r.status != 200:
+                log.warning("RPC failed")
+                return
+            sigs = (await r.json()).get("result", [])
+        log.debug(f"Found {len(sigs)} signatures")
+        for sig in sigs:
+            tx = await get_tx(sig["signature"], sess)
+            if not tx: continue
+            logs = tx.get("meta", {}).get("logMessages", [])
+            if not any("Create" in l for l in logs): continue
+            mint = extract_mint_from_tx(tx)
+            if mint and mint not in seen:
                 seen[mint] = time.time()
                 token_db[mint] = {"launched": time.time(), "alerted": False}
                 ready_queue.append(mint)
                 if len(ready_queue) > MAX_QUEUE:
                     ready_queue.pop(0)
-                log.info(f"LAUNCH → {short_addr(mint)}")
+                log.info(f"NEW LAUNCH: {short_addr(mint)}")
+    except Exception as e:
+        log.error(f"RPC Error: {e}")
+
+async def get_tx(sig, sess):
+    payload = {"jsonrpc": "2.0", "id": 1, "method": "getTransaction", "params": [sig, {"encoding": "jsonParsed"}]}
+    async with sess.post(SOLANA_RPC, json=payload, timeout=10) as r:
+        if r.status != 200: return None
+        return (await r.json()).get("result")
+
+def extract_mint_from_tx(tx: dict) -> str | None:
+    for inner in tx.get("meta", {}).get("innerInstructions", []):
+        for instr in inner.get("instructions", []):
+            if instr.get("program") == "spl-token" and instr.get("parsed", {}).get("type") in ("initializeMint", "initializeMint2"):
+                return instr["parsed"]["info"]["mint"]
+            if instr.get("programId") == "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P":
+                accounts = instr.get("accounts", [])
+                if len(accounts) >= 4 and len(accounts[3]) == 44:
+                    return accounts[3]
+    return None
 
 async def get_pump_curve(mint, sess):
     try:
