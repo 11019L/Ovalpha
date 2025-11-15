@@ -410,12 +410,28 @@ async def get_new_pairs(sess):
                 return
             sigs = (await r.json()).get("result", [])
         log.debug(f"Found {len(sigs)} signatures")
+
         for sig in sigs:
-            tx = await get_tx(sig["signature"], sess)
-            if not tx: continue
+            sig_id = sig["signature"]
+            log.debug(f"Fetching TX: {sig_id[:8]}...")
+
+            tx = await get_tx(sig_id, sess)
+            if not tx:
+                log.debug(f"TX {sig_id[:8]}... → No data")
+                continue
+
             logs = tx.get("meta", {}).get("logMessages", [])
-            if not any("Create" in l for l in logs): continue
+            log.debug(f"TX {sig_id[:8]}... → {len(logs)} log messages")
+
+            if not any("Create" in l for l in logs):
+                log.debug(f"TX {sig_id[:8]}... → No 'Create' in logs")
+                continue
+
+            log.debug(f"TX {sig_id[:8]}... → 'Create' found! Parsing mint...")
+
             mint = extract_mint_from_tx(tx)
+            log.debug(f"TX {sig_id[:8]}... → Extracted mint: {mint}")
+
             if mint and mint not in seen:
                 seen[mint] = time.time()
                 token_db[mint] = {"launched": time.time(), "alerted": False}
@@ -423,9 +439,12 @@ async def get_new_pairs(sess):
                 if len(ready_queue) > MAX_QUEUE:
                     ready_queue.pop(0)
                 log.info(f"NEW LAUNCH: {short_addr(mint)}")
+            else:
+                log.debug(f"Mint {mint} → Already seen or invalid")
+
     except Exception as e:
         log.error(f"RPC Error: {e}")
-
+        
 async def get_tx(sig, sess):
     payload = {"jsonrpc": "2.0", "id": 1, "method": "getTransaction", "params": [sig, {"encoding": "jsonParsed"}]}
     async with sess.post(SOLANA_RPC, json=payload, timeout=10) as r:
@@ -433,14 +452,25 @@ async def get_tx(sig, sess):
         return (await r.json()).get("result")
 
 def extract_mint_from_tx(tx: dict) -> str | None:
+    # Method 1: SPL Token initializeMint
     for inner in tx.get("meta", {}).get("innerInstructions", []):
         for instr in inner.get("instructions", []):
-            if instr.get("program") == "spl-token" and instr.get("parsed", {}).get("type") in ("initializeMint", "initializeMint2"):
-                return instr["parsed"]["info"]["mint"]
-            if instr.get("programId") == "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P":
-                accounts = instr.get("accounts", [])
-                if len(accounts) >= 4 and len(accounts[3]) == 44:
-                    return accounts[3]
+            parsed = instr.get("parsed", {})
+            if parsed.get("type") in ("initializeMint", "initializeMint2"):
+                info = parsed.get("info", {})
+                mint = info.get("mint")
+                if mint and len(mint) == 44:
+                    return mint
+
+    # Method 2: Pump.fun program accounts
+    message = tx.get("transaction", {}).get("message", {})
+    for instr in message.get("instructions", []):
+        if instr.get("programId") == "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P":
+            accounts = instr.get("accounts", [])
+            if len(accounts) > 3:
+                candidate = accounts[3]
+                if len(candidate) == 44:
+                    return candidate
     return None
 
 async def get_pump_curve(mint, sess):
