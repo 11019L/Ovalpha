@@ -503,15 +503,16 @@ async def premium_pump_scanner():
         sess = aiohttp.ClientSession()
         async with sess:
             while True:
-    await asyncio.sleep(15)  # ← FASTER
-    await get_new_pairs(sess)
-    now = time.time()
-    for mint in list(ready_queue):
-        await process_token(mint, sess, now)  # ← NO DELAY)
+                await asyncio.sleep(15)  # ← FASTER CHECKS
+                await get_new_pairs(sess)
+                now = time.time()
+                for mint in list(ready_queue):
+                    await process_token(mint, sess, now)  # ← INSTANT FILTER
     except Exception as e:
         log.exception(f"Scanner error: {e}")
     finally:
-        if sess: await sess.close()
+        if sess:
+            await sess.close()
 
 # --------------------------------------------------------------------------- #
 # SAFE EDIT (PREVENT CRASH ON EDIT)
