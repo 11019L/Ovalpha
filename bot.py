@@ -615,6 +615,26 @@ async def check_auto_sell():
                     await app.bot.send_message(u["chat_id"], f"<b>AUTO-SELL</b>\nPnL: <code>{fmt_usd(profit - fee)}</code>")
 
 # --------------------------------------------------------------------------- #
+# TEXT HANDLER (FOR CUSTOM BUY AMOUNT)
+# --------------------------------------------------------------------------- #
+async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    text = update.message.text.strip()
+    u = users[uid]
+
+    if u.get("pending_buy"):
+        try:
+            amount = float(text)
+            if amount <= 0:
+                raise ValueError
+            mint = u.pop("pending_buy")
+            await jupiter_buy(uid, mint, amount)
+        except:
+            await update.message.reply_text("Invalid amount. Send a number > 0.")
+        return
+
+    await update.message.reply_text("Use /menu")
+# --------------------------------------------------------------------------- #
 # MAIN
 # --------------------------------------------------------------------------- #
 async def main():
