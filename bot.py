@@ -422,7 +422,7 @@ async def get_new_pairs(sess):
     payload = {
         "jsonrpc": "2.0", "id": 1,
         "method": "getSignaturesForAddress",
-        "params": [program_id, {"limit": 40}]
+        "params": [program_id, {"limit": 250}]
     }
     try:
         async with sess.post(SOLANA_RPC, json=payload, timeout=15) as r:
@@ -514,6 +514,11 @@ async def has_social_buzz(mint, sess):
 
 async def process_token(mint, sess, now):
     try:
+        # SKIP IF OLDER THAN 10 MINUTES
+        if now - seen[mint] > 600:
+            log.info(f"SKIPPED {short_addr(mint)} — too old ({int((now - seen[mint])/60)}m)")
+            return
+
         # 1. GET FDV INSTANTLY
         curve = await get_pump_curve(mint, sess)
         fdv = curve.get("fdv_usd", 0)
@@ -545,6 +550,7 @@ async def process_token(mint, sess, now):
         if not token_db[mint].get("alerted"):
             token_db[mint]["alerted"] = True
             await broadcast_alert(mint, "TOKEN", fdv, int((now - seen[mint]) / 60))
+
     except Exception as e:
         log.error(f"Process error: {e}")
 
