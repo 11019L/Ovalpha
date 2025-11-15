@@ -47,10 +47,10 @@ CIPHER = Fernet(ENCRYPT_KEY)
 
 # HIGH-IMPACT FILTERS
 MIN_FDVS_SNIPE = 800
-MAX_FDVS_SNIPE = 5000
+MAX_FDVS_SNIPE = 8000
 MAX_VOL_SNIPE = 300
-LIQ_FDV_RATIO = 0.7
-MIN_HOLDERS = 180
+LIQ_FDV_RATIO = 0.65
+MIN_HOLDERS = 70
 MIN_UNIQUE_BUYERS = 3
 MAX_QUEUE = 500
 
@@ -463,11 +463,22 @@ async def has_social_buzz(mint, sess):
 
 async def process_token(mint, sess, now):
     try:
+        # 1. GET FDV INSTANTLY
         curve = await get_pump_curve(mint, sess)
         fdv = curve.get("fdv_usd", 0)
         liq = curve.get("liquidity_usd", 0)
         vol_5m = curve.get("volume_5m", 0)
 
+        # 2. EARLY EXIT IF ALREADY TOO BIG
+        if fdv > MAX_FDVS_SNIPE:
+            log.info(f"SKIPPED {short_addr(mint)} — FDV ${fdv:,.0f} > ${MAX_FDVS_SNIPE}")
+            return
+
+        # 3. WAIT ONLY 30 SECONDS (NOT 60)
+        if now - seen[mint] < 30:
+            return  # re-check in next loop
+
+        # 4. FULL FILTERS
         if not (MIN_FDVS_SNIPE <= fdv <= MAX_FDVS_SNIPE): return
         if liq < LIQ_FDV_RATIO * fdv: return
         if vol_5m > MAX_VOL_SNIPE: return
@@ -479,6 +490,7 @@ async def process_token(mint, sess, now):
 
         if await has_social_buzz(mint, sess) < 2: return
 
+        # GOLD!
         if not token_db[mint].get("alerted"):
             token_db[mint]["alerted"] = True
             await broadcast_alert(mint, "TOKEN", fdv, int((now - seen[mint]) / 60))
@@ -491,13 +503,11 @@ async def premium_pump_scanner():
         sess = aiohttp.ClientSession()
         async with sess:
             while True:
-                await asyncio.sleep(random.uniform(55, 65))
-                await get_new_pairs(sess)
-                now = time.time()
-                for mint in list(ready_queue):
-                    if now - seen[mint] < 60: continue
-                    ready_queue.remove(mint)
-                    await process_token(mint, sess, now)
+    await asyncio.sleep(15)  # ← FASTER
+    await get_new_pairs(sess)
+    now = time.time()
+    for mint in list(ready_queue):
+        await process_token(mint, sess, now)  # ← NO DELAY)
     except Exception as e:
         log.exception(f"Scanner error: {e}")
     finally:
