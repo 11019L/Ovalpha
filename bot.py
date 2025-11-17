@@ -418,53 +418,37 @@ async def refresh_programs(sess):
         pass
 
 async def get_new_pairs(sess):
-    program_id = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
-    payload = {
-        "jsonrpc": "2.0", "id": 1,
-        "method": "getSignaturesForAddress",
-        "params": [program_id, {"limit": 250}]
-    }
+    # NEW METHOD – poll pump.fun public API (fastest & most reliable in 2025)
+    url = "https://pump.fun/api/tokens?sort=created_timestamp&order=desc&limit=50&offset=0"
     try:
-        async with sess.post(SOLANA_RPC, json=payload, timeout=15) as r:
-            if r.status != 200:
-                log.warning("RPC failed")
+        async with sess.get(url, timeout=15) as r:
+            if not r.ok:
                 return
-            sigs = (await r.json()).get("result", [])
-        log.debug(f"Found {len(sigs)} signatures")
+            tokens = await r.json()
+            now = time.time()
+            for token in tokens:
+                mint = token["mint"]
+                created = token["created_timestamp"]  # unix seconds
+                age = now - created
 
-        for sig in sigs:
-            sig_id = sig["signature"]
-            log.debug(f"Fetching TX: {sig_id[:8]}...")
+                # Only tokens younger than 10 minutes
+                if age > 600:
+                    continue
 
-            tx = await get_tx(sig_id, sess)
-            if not tx:
-                log.debug(f"TX {sig_id[:8]}... → No data")
-                continue
-
-            logs = tx.get("meta", {}).get("logMessages", [])
-            log.debug(f"TX {sig_id[:8]}... → {len(logs)} log messages")
-
-            if not any("Create" in l for l in logs):
-                log.debug(f"TX {sig_id[:8]}... → No 'Create' in logs")
-                continue
-
-            log.debug(f"TX {sig_id[:8]}... → 'Create' found! Parsing mint...")
-
-            mint = extract_mint_from_tx(tx)
-            log.debug(f"TX {sig_id[:8]}... → Extracted mint: {mint}")
-
-            if mint and mint not in seen:
-                seen[mint] = time.time()
-                token_db[mint] = {"launched": time.time(), "alerted": False}
-                ready_queue.append(mint)
-                if len(ready_queue) > MAX_QUEUE:
-                    ready_queue.pop(0)
-                log.info(f"NEW LAUNCH: {short_addr(mint)}")
-            else:
-                log.debug(f"Mint {mint} → Already seen or invalid")
-
+                if mint not in seen:
+                    seen[mint] = time.time()
+                    token_db[mint] = {
+                        "launched": created,
+                        "alerted": False,
+                        "fdv": token.get("market_cap", 0),  # they now give FDV directly
+                        "symbol": token.get("symbol", "???")
+                    }
+                    ready_queue.append(mint)
+                    if len(ready_queue) > MAX_QUEUE:
+                        ready_queue.pop(0)
+                    log.info(f"NEW LAUNCH via API → {token['symbol']} | {short_addr(mint)} | Age: {int(age)}s")
     except Exception as e:
-        log.error(f"RPC Error: {e}")
+        log.error(f"Pump API error: {e}")
         
 async def get_tx(sig, sess):
     payload = {"jsonrpc": "2.0", "id": 1, "method": "getTransaction", "params": [sig, {"encoding": "jsonParsed"}]}
