@@ -418,37 +418,28 @@ async def refresh_programs(sess):
         pass
 
 async def get_new_pairs(sess):
-    # NEW METHOD – poll pump.fun public API (fastest & most reliable in 2025)
-    url = "https://pump.fun/api/tokens?sort=created_timestamp&order=desc&limit=50&offset=0"
+    url = "https://pump.fun/api/tokens?offset=0&limit=100&sort=created_timestamp&order=desc"
     try:
         async with sess.get(url, timeout=15) as r:
             if not r.ok:
+                log.warning(f"Pump API error {r.status}")
                 return
             tokens = await r.json()
             now = time.time()
-            for token in tokens:
-                mint = token["mint"]
-                created = token["created_timestamp"]  # unix seconds
-                age = now - created
-
-                # Only tokens younger than 10 minutes
-                if age > 600:
-                    continue
-
-                if mint not in seen:
+            new_count = 0
+            for t in tokens:
+                mint = t["mint"]
+                age = now - t["created_timestamp"]
+                if age < 720 and mint not in seen:  # under 12 min
                     seen[mint] = time.time()
-                    token_db[mint] = {
-                        "launched": created,
-                        "alerted": False,
-                        "fdv": token.get("market_cap", 0),  # they now give FDV directly
-                        "symbol": token.get("symbol", "???")
-                    }
+                    token_db[mint] = {"launched": t["created_timestamp"], "alerted": False}
                     ready_queue.append(mint)
-                    if len(ready_queue) > MAX_QUEUE:
-                        ready_queue.pop(0)
-                    log.info(f"NEW LAUNCH via API → {token['symbol']} | {short_addr(mint)} | Age: {int(age)}s")
+                    new_count += 1
+                    log.info(f"NEW → {t.get('symbol','?')} | {short_addr(mint)} | {int(age)}s old")
+            if new_count:
+                log.info(f"Added {new_count} new launches this cycle")
     except Exception as e:
-        log.error(f"Pump API error: {e}")
+        log.error(f"Pump API crash: {e}")
         
 async def get_tx(sig, sess):
     payload = {"jsonrpc": "2.0", "id": 1, "method": "getTransaction", "params": [sig, {"encoding": "jsonParsed"}]}
