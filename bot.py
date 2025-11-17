@@ -16,6 +16,9 @@ load_dotenv()
 import logging
 logging.basicConfig(level=logging.DEBUG)  # ← SEE EVERYTHING
 import aiohttp
+from solana.rpc.websocket_api import connect
+from asyncstdlib import enumerate  # Optional but recommended for WS iteration
+import json
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import (
