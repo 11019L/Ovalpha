@@ -418,11 +418,16 @@ async def get_new_pairs(sess):
                 if age_sec > 720:
                     continue
 
-                seen[mint] = now
-                fdv = float(token.get("fullyDilutedValuation", 0))
-                symbol = token.get("symbol", "UNKNOWN")
-                liq = float(token.get("liquidity", 0))
+                # ← THIS IS THE FIX: safe float conversion
+                fdv_raw = token.get("fullyDilutedValuation")
+                fdv = float(fdv_raw) if fdv_raw is not None else 0.0
 
+                liq_raw = token.get("liquidity")
+                liq = float(liq_raw) if liq_raw is not None else 0.0
+
+                symbol = token.get("symbol", "UNKNOWN") or "?"
+
+                seen[mint] = now
                 token_db[mint] = {
                     "launched": created,
                     "alerted": False,
@@ -439,6 +444,8 @@ async def get_new_pairs(sess):
 
             if added:
                 log.info(f"Added {added} new tokens this cycle")
+            else:
+                log.info("No new launches this cycle")
 
     except Exception as e:
         log.error(f"Moralis poll error: {e}")
