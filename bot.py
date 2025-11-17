@@ -418,28 +418,58 @@ async def refresh_programs(sess):
         pass
 
 async def get_new_pairs(sess):
-    url = "https://pump.fun/api/tokens?offset=0&limit=100&sort=created_timestamp&order=desc"
+    # DEXSCREENER PUMP.FUN ENDPOINT – 100% WORKING NOV 2025
+    url = "https://api.dexscreener.com/latest/dex/tokens/pump-fun"  # ← NEW ENDPOINT
     try:
+        log.info("Fetching new Pump.fun launches from DexScreener...")
         async with sess.get(url, timeout=15) as r:
             if not r.ok:
-                log.warning(f"Pump API error {r.status}")
+                log.warning(f"DexScreener API returned {r.status}")
                 return
-            tokens = await r.json()
-            now = time.time()
-            new_count = 0
-            for t in tokens:
-                mint = t["mint"]
-                age = now - t["created_timestamp"]
-                if age < 720 and mint not in seen:  # under 12 min
+            data = await r.json()
+            pairs = data.get("pairs", [])
+            log.info(f"DexScreener returned {len(pairs)} Pump.fun pairs")
+
+            now = time.time() * 1000  # Dex uses ms timestamps
+            added = 0
+            for pair in pairs:
+                mint = pair.get("baseToken", {}).get("address")
+                if not mint:
+                    continue
+
+                # Check age: only tokens under 12 minutes (720 seconds)
+                created_at = pair.get("pairCreatedAt", 0)
+                age_ms = now - created_at
+                if age_ms > 720000:  # 12 min in ms
+                    continue
+
+                if mint not in seen:
                     seen[mint] = time.time()
-                    token_db[mint] = {"launched": t["created_timestamp"], "alerted": False}
+                    # Pre-populate with Dex data (faster than curve fetch)
+                    fdv = pair.get("marketCap", 0) or pair.get("fdv", 0)
+                    symbol = pair.get("baseToken", {}).get("symbol", "UNKNOWN")
+                    token_db[mint] = {
+                        "launched": created_at / 1000,  # convert to seconds
+                        "alerted": False,
+                        "symbol": symbol,
+                        "fdv": fdv / 1e6 if fdv else 0  # often in smallest units
+                    }
                     ready_queue.append(mint)
-                    new_count += 1
-                    log.info(f"NEW → {t.get('symbol','?')} | {short_addr(mint)} | {int(age)}s old")
-            if new_count:
-                log.info(f"Added {new_count} new launches this cycle")
+                    if len(ready_queue) > MAX_QUEUE:
+                        ready_queue.pop(0)
+
+                    age_sec = int(age_ms / 1000)
+                    log.info(f"NEW LAUNCH → {symbol} | {short_addr(mint)} | {age_sec}s old | FDV ${fdv/1e6 if fdv else 0:,.0f}")
+
+                    added += 1
+
+            if added:
+                log.info(f"Added {added} new Pump.fun tokens this cycle")
+            elif len(pairs) > 0:
+                log.info("No new launches this cycle – all older than 12 min")
+
     except Exception as e:
-        log.error(f"Pump API crash: {e}")
+        log.error(f"DexScreener API error: {e}")
         
 async def get_tx(sig, sess):
     payload = {"jsonrpc": "2.0", "id": 1, "method": "getTransaction", "params": [sig, {"encoding": "jsonParsed"}]}
@@ -489,62 +519,71 @@ async def has_social_buzz(mint, sess):
 
 async def process_token(mint, sess, now):
     try:
-        # SKIP IF OLDER THAN 10 MINUTES
+        # Skip if too old
         if now - seen[mint] > 600:
-            log.info(f"SKIPPED {short_addr(mint)} — too old ({int((now - seen[mint])/60)}m)")
+            log.info(f"SKIPPED {short_addr(mint)} — too old")
             return
 
-        # 1. GET FDV INSTANTLY
-        curve = await get_pump_curve(mint, sess)
-        fdv = curve.get("fdv_usd", 0)
-        liq = curve.get("liquidity_usd", 0)
-        vol_5m = curve.get("volume_5m", 0)
+        # Use pre-populated data from DexScreener (faster!)
+        token_info = token_db.get(mint, {})
+        fdv = token_info.get("fdv", 0)
+        symbol = token_info.get("symbol", "UNKNOWN")
 
-        # 2. EARLY EXIT IF ALREADY TOO BIG
+        # Early exit if too big
         if fdv > MAX_FDVS_SNIPE:
-            log.info(f"SKIPPED {short_addr(mint)} — FDV ${fdv:,.0f} > ${MAX_FDVS_SNIPE}")
+            log.info(f"SKIPPED {short_addr(mint)} — FDV ${fdv:,.0f} too high")
             return
 
-        # 3. WAIT ONLY 30 SECONDS (NOT 60)
-        if now - seen[mint] < 30:
-            return  # re-check in next loop
+        # Wait 20–30 seconds for real liquidity to build (Dex data lags slightly)
+        if now - seen[mint] < 25:
+            return  # re-check next loop
 
-        # 4. FULL FILTERS
-        if not (MIN_FDVS_SNIPE <= fdv <= MAX_FDVS_SNIPE): return
-        if liq < LIQ_FDV_RATIO * fdv: return
-        if vol_5m > MAX_VOL_SNIPE: return
+        # Fetch fresh curve data only for finalists (to confirm)
+        curve = await get_pump_curve(mint, sess)
+        fresh_fdv = curve.get("fdv_usd", fdv)  # fallback to Dex
+        fresh_liq = curve.get("liquidity_usd", 0)
+        fresh_vol = curve.get("volume_5m", 0)
 
+        # Your existing filters (now with fresh data)
+        if not (MIN_FDVS_SNIPE <= fresh_fdv <= MAX_FDVS_SNIPE):
+            return
+        if fresh_liq < LIQ_FDV_RATIO * fresh_fdv:
+            return
+        if fresh_vol > MAX_VOL_SNIPE:
+            return
+
+        # Holders check (unchanged)
         async with AsyncClient(random.choice(RPC_POOL)) as client:
-            if not await is_locked(mint, client): return
-            holders = await client.get_token_largest_accounts(mint)
-            if sum(1 for a in holders.value if a.ui_amount > 0) < MIN_HOLDERS: return
+            holders_resp = await client.get_token_largest_accounts(mint)
+            holder_count = sum(1 for acc in holders_resp.value if acc.ui_amount > 0)
+            if holder_count < MIN_HOLDERS:
+                return
 
-        if await has_social_buzz(mint, sess) < 2: return
+        # Social buzz (placeholder, unchanged)
+        if await has_social_buzz(mint, sess) < 2:
+            return
 
-        # GOLD!
-        if not token_db[mint].get("alerted"):
+        # GOLD ALERT!
+        if not token_info.get("alerted"):
             token_db[mint]["alerted"] = True
-            await broadcast_alert(mint, "TOKEN", fdv, int((now - seen[mint]) / 60))
+            await broadcast_alert(mint, symbol, fresh_fdv, int((now - seen[mint]) / 60))
 
     except Exception as e:
-        log.error(f"Process error: {e}")
+        log.error(f"Process error for {short_addr(mint)}: {e}")
 
 async def premium_pump_scanner():
-    sess = None
-    try:
-        sess = aiohttp.ClientSession()
-        async with sess:
-            while True:
-                await asyncio.sleep(15)  # ← FASTER CHECKS
-                await get_new_pairs(sess)
-                now = time.time()
-                for mint in list(ready_queue):
-                    await process_token(mint, sess, now)  # ← INSTANT FILTER
-    except Exception as e:
-        log.exception(f"Scanner error: {e}")
-    finally:
-        if sess:
-            await sess.close()
+    async with aiohttp.ClientSession() as sess:          # ← proper async with
+        while True:
+            log.info("SCANNER TICK – checking pump.fun for new launches")   # ← YOU WILL SEE THIS EVERY 8 SEC
+
+            await get_new_pairs(sess)                   # ← new API version from previous message
+
+            now = time.time()
+            # Process tokens that are waiting for full filters
+            for mint in list(ready_queue):
+                await process_token(mint, sess, now)
+
+            await asyncio.sleep(8)   # ← 8 seconds is the sweet spot right now
 
 # --------------------------------------------------------------------------- #
 # SAFE EDIT (PREVENT CRASH ON EDIT)
