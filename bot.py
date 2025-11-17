@@ -105,8 +105,8 @@ async def auto_save():
             saveable = data.copy()
             saveable["admin_id"] = admin_id
             for u in saveable["users"].values():
-                u.pop("connect_challenge", None, None)
-                u.pop("connect_expiry", None, None)
+                u.pop("connect_challenge", None)   # ← Fixed: only 2 args
+                u.pop("connect_expiry", None)      # ← Fixed: only 2 args
             DATA_FILE.write_text(json.dumps(saveable, indent=2))
 
 # --------------------------------------------------------------------------- #
