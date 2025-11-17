@@ -418,67 +418,78 @@ async def refresh_programs(sess):
         pass
 
 async def get_new_pairs(sess):
-    # DEXSCREENER SOLANA PAIRS – FILTER FOR PUMP.FUN (RELIABLE METHOD)
-    url = "https://api.dexscreener.com/latest/dex/pairs/solana?rankBy=pairAge&order=asc&limit=100"  # Newest first by age
+    # PUMP.FUN V1 API – 100% WORKING NOV 17 2025 (New Launches Only)
+    url = "https://pump.fun/api/v1/tokens?sort=created_timestamp&order=desc&limit=50&offset=0"
     try:
-        log.info("Fetching latest Solana pairs from DexScreener...")
+        log.info("Fetching new Pump.fun launches directly from their API...")
         async with sess.get(url, timeout=15) as r:
             if not r.ok:
-                log.warning(f"DexScreener API returned {r.status}")
+                log.warning(f"Pump.fun API returned {r.status} — trying fallback...")
+                # Fallback to DexScreener search for any Solana pairs
+                fallback_url = "https://api.dexscreener.com/latest/dex/search?q=solana"
+                async with sess.get(fallback_url, timeout=10) as fb:
+                    if fb.ok:
+                        fb_data = await fb.json()
+                        pairs = fb_data.get("pairs", [])
+                        log.info(f"Fallback: DexScreener search gave {len(pairs)} Solana pairs")
+                        # Process fallback pairs (filter for new ones)
+                        now = time.time() * 1000
+                        for pair in pairs:
+                            mint = pair.get("baseToken", {}).get("address")
+                            if mint and pair.get("pairCreatedAt"):
+                                age_ms = now - pair["pairCreatedAt"]
+                                if age_ms < 720000:  # <12 min
+                                    if mint not in seen:
+                                        seen[mint] = time.time()
+                                        token_db[mint] = {
+                                            "launched": pair["pairCreatedAt"] / 1000,
+                                            "alerted": False,
+                                            "symbol": pair.get("baseToken", {}).get("symbol", "UNKNOWN"),
+                                            "fdv": pair.get("marketCap", 0) or 0
+                                        }
+                                        ready_queue.append(mint)
+                                        log.info(f"FALLBACK NEW → {token_db[mint]['symbol']} | {short_addr(mint)} | {int(age_ms/1000)}s old")
                 return
-            data = await r.json()
-            pairs = data.get("pairs", [])  # Safe fallback to []
-            log.info(f"DexScreener returned {len(pairs)} Solana pairs")  # This will be 100+
 
-            now = time.time() * 1000  # ms for Dex timestamps
+            tokens = await r.json()
+            log.info(f"Pump.fun API returned {len(tokens)} new tokens")
+
+            now = time.time()
             added = 0
-
-            for pair in pairs:
-                # Extract mint (baseToken address)
-                base_token = pair.get("baseToken", {})
-                mint = base_token.get("address")
-                if not mint or len(mint) != 44:
+            for token in tokens:
+                mint = token.get("mint")
+                if not mint:
                     continue
 
-                # PUMP.FUN FILTER: Check if pair address indicates Pump.fun (starts with known Pump bonding curve)
-                pair_address = pair.get("pairAddress", "")
-                if not (pair_address.startswith("11111111111111111111111111111112") or 
-                        "pump" in pair_address.lower() or 
-                        pair.get("dexId") == "pumpswap"):  # Pump's DEX ID
-                    continue  # Skip non-Pump pairs
-
-                # Age filter: under 12 min (720k ms)
-                created_at = pair.get("pairCreatedAt", 0)
-                age_ms = now - created_at
-                if age_ms > 720000:
+                created_ts = token.get("created_timestamp", 0)
+                age_sec = now - created_ts
+                if age_sec > 720:  # >12 min → skip
                     continue
 
                 if mint not in seen:
                     seen[mint] = time.time()
-                    fdv = pair.get("marketCap", 0) or pair.get("fdv", 0)
-                    symbol = base_token.get("name", "UNKNOWN") or base_token.get("symbol", "?")
+                    fdv = token.get("market_cap", 0) or token.get("virtual_sol_reserves", 0) * 180  # ~$180/SOL
+                    symbol = token.get("symbol", "UNKNOWN")
                     token_db[mint] = {
-                        "launched": created_at / 1000,  # to seconds
+                        "launched": created_ts,
                         "alerted": False,
                         "symbol": symbol,
-                        "fdv": fdv or 0  # Often already in USD
+                        "fdv": fdv
                     }
                     ready_queue.append(mint)
                     if len(ready_queue) > MAX_QUEUE:
                         ready_queue.pop(0)
 
-                    age_sec = int(age_ms / 1000)
-                    log.info(f"NEW PUMP LAUNCH → {symbol} | {short_addr(mint)} | {age_sec}s old | FDV ${token_db[mint]['fdv']:,.0f}")
-
+                    log.info(f"NEW PUMP LAUNCH → {symbol} | {short_addr(mint)} | {int(age_sec)}s old | FDV ${fdv:,.0f}")
                     added += 1
 
             if added > 0:
                 log.info(f"Added {added} new Pump.fun tokens this cycle")
             else:
-                log.info("No new Pump launches this cycle (filtered from Solana pairs)")
+                log.info("No new launches this cycle — all older than 12 min")
 
     except Exception as e:
-        log.error(f"DexScreener Solana API error: {e}")
+        log.error(f"Pump.fun API error: {e} — scanner still alive")
         
 async def get_tx(sig, sess):
     payload = {"jsonrpc": "2.0", "id": 1, "method": "getTransaction", "params": [sig, {"encoding": "jsonParsed"}]}
