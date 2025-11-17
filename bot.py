@@ -11,14 +11,11 @@ import base64
 from pathlib import Path
 from dotenv import load_dotenv
 from cryptography.fernet import Fernet
+from datetime import datetime  # ← FIXED: moved to top
+
 load_dotenv()
 
-import logging
-logging.basicConfig(level=logging.DEBUG)  # ← SEE EVERYTHING
 import aiohttp
-from solana.rpc.websocket_api import connect
-from asyncstdlib import enumerate  # Optional but recommended for WS iteration
-import json
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -26,7 +23,6 @@ from telegram.ext import (
     CallbackQueryHandler, MessageHandler, filters
 )
 from solders.pubkey import Pubkey
-from solders.keypair import Keypair
 from solana.rpc.async_api import AsyncClient
 from jupiter_python_sdk.jupiter import Jupiter
 
@@ -35,42 +31,32 @@ from jupiter_python_sdk.jupiter import Jupiter
 # --------------------------------------------------------------------------- #
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger("onion")
-for lib in ("httpx", "httpcore", "telegram"):
+for lib in ("httpx", "httpcore", "telegram", "aiohttp"):
     logging.getLogger(lib).setLevel(logging.WARNING)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN missing")
+
 BOT_USERNAME = os.getenv("BOT_USERNAME", "onionx_bot")
 USDT_BSC_WALLET = os.getenv("USDT_BSC_WALLET")
 FEE_WALLET = os.getenv("FEE_WALLET", "So11111111111111111111111111111111111111112")
-SOLANA_RPC = os.getenv("SOLANA_RPC", "https://api.mainnet-beta.solana.com")
-ENCRYPT_KEY = os.getenv("ENCRYPT_KEY") or Fernet.generate_key()
-CIPHER = Fernet(ENCRYPT_KEY)
 MORALIS_API_KEY = os.getenv("MORALIS_API_KEY")
 if not MORALIS_API_KEY:
     raise ValueError("MORALIS_API_KEY missing from .env")
 
-# HIGH-IMPACT FILTERS
+# Filters
 MIN_FDVS_SNIPE = 400
 MAX_FDVS_SNIPE = 20000
 MAX_VOL_SNIPE = 300
 LIQ_FDV_RATIO = 0.65
 MIN_HOLDERS = 30
-MIN_UNIQUE_BUYERS = 3
 MAX_QUEUE = 500
 
-# RPC POOL
 RPC_POOL = [
-    SOLANA_RPC,
-    "https://solana-mainnet.core.chainstack.com/abc123",
-    "https://rpc.ankr.com/solana"
-]
-
-# PUMP.FUN PROGRAMS (auto-refresh)
-PUMP_FUN_PROGRAMS = [
-    "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
-    "pumpfun111111111111111111111111111111111"
+    "https://api.mainnet-beta.solana.com",
+    "https://rpc.ankr.com/solana",
+    "https://solana-mainnet.core.chainstack.com/abc123"
 ]
 
 # --------------------------------------------------------------------------- #
@@ -85,9 +71,9 @@ save_lock = asyncio.Lock()
 admin_id = None
 app = None
 
-# --------------------------------------------------------------------------- #
-# PERSISTENCE
-# --------------------------------------------------------------------------- #
+DATA_FILE = Path("data.json")
+data = {"users": {}, "revenue": 0.0, "total_trades": 0, "wins": 0}
+
 def load_data():
     global admin_id
     if DATA_FILE.is_file():
@@ -109,19 +95,18 @@ def load_data():
             log.error(f"Load error: {e}")
     return data
 
-DATA_FILE = Path("data.json")
 data = load_data()
 users = data["users"]
 
 async def auto_save():
     while True:
-        await asyncio.sleep(30)
+        await asyncio.sleep(60)
         async with save_lock:
             saveable = data.copy()
             saveable["admin_id"] = admin_id
             for u in saveable["users"].values():
-                u.pop("connect_challenge", None)
-                u.pop("connect_expiry", None)
+                u.pop("connect_challenge", None, None)
+                u.pop("connect_expiry", None, None)
             DATA_FILE.write_text(json.dumps(saveable, indent=2))
 
 # --------------------------------------------------------------------------- #
@@ -133,18 +118,6 @@ def fmt_sol(v: float) -> str:
     return f"{v:.3f} SOL"
 def short_addr(addr: str) -> str:
     return f"{addr[:6]}...{addr[-4:]}" if addr and len(addr) > 10 else "—"
-
-async def rpc_post(payload):
-    for url in random.sample(RPC_POOL, len(RPC_POOL)):
-        try:
-            async with aiohttp.ClientSession() as sess:
-                async with sess.post(url, json=payload, timeout=10) as r:
-                    if r.status == 200:
-                        return await r.json()
-        except:
-            continue
-    return None
-
 # --------------------------------------------------------------------------- #
 # PHANTOM CONNECT
 # --------------------------------------------------------------------------- #
@@ -414,22 +387,10 @@ async def jupiter_buy(uid: int, mint: str, sol_amount: float):
 # --------------------------------------------------------------------------- #
 # HIGH-IMPACT SCANNER
 # --------------------------------------------------------------------------- #
-async def refresh_programs(sess):
-    global PUMP_FUN_PROGRAMS
-    try:
-        async with sess.get("https://pump.fun/api/programs") as r:
-            if r.ok:
-                PUMP_FUN_PROGRAMS = await r.json()
-    except:
-        pass
-
 async def get_new_pairs(sess):
     url = "https://solana-gateway.moralis.io/token/mainnet/exchange/pumpfun/new?limit=50"
     try:
-        headers = {
-            "accept": "application/json",
-            "X-API-Key": MORALIS_API_KEY
-        }
+        headers = {"accept": "application/json", "X-API-Key": MORALIS_API_KEY}
         log.info("Polling Moralis for new Pump.fun tokens...")
         async with sess.get(url, headers=headers, timeout=15) as r:
             if not r.ok:
@@ -437,242 +398,119 @@ async def get_new_pairs(sess):
                 return
             data = await r.json()
             tokens = data.get("result", [])
-            log.info(f"Moralis returned {len(tokens)} new Pump.fun tokens")
+            log.info(f"Moralis returned {len(tokens)} new tokens")
 
             now = time.time()
             added = 0
             for token in tokens:
                 mint = token.get("tokenAddress")
-                if not mint:
+                if not mint or mint in seen:
                     continue
 
-                # ← MOVE IMPORT HERE (or to top of file)
-                from datetime import datetime
                 created_str = token.get("createdAt")
+                created = now
                 if created_str:
-                    created = datetime.fromisoformat(created_str.replace("Z", "+00:00")).timestamp()
-                else:
-                    created = now
+                    try:
+                        created = datetime.fromisoformat(created_str.replace("Z", "+00:00")).timestamp()
+                    except:
+                        pass
                 age_sec = now - created
-
-                if age_sec > 720:  # >12 min → skip
+                if age_sec > 720:
                     continue
 
-                if mint not in seen:
-                    seen[mint] = now
-                    fdv = float(token.get("fullyDilutedValuation", 0))
-                    symbol = token.get("symbol", "UNKNOWN")
-                    liq = float(token.get("liquidity", 0))
-                    token_db[mint] = {
-                        "launched": created,
-                        "alerted": False,
-                        "symbol": symbol,
-                        "fdv": fdv,
-                        "liq": liq  # Pre-fill for faster filtering
-                    }
-                    ready_queue.append(mint)
-                    if len(ready_queue) > MAX_QUEUE:
-                        ready_queue.pop(0)
+                seen[mint] = now
+                fdv = float(token.get("fullyDilutedValuation", 0))
+                symbol = token.get("symbol", "UNKNOWN")
+                liq = float(token.get("liquidity", 0))
 
-                    log.info(f"NEW VIA MORALIS → {symbol} | {short_addr(mint)} | {int(age_sec)}s old | FDV ${fdv:,.0f} | Liq ${liq:,.0f}")
-                    added += 1
+                token_db[mint] = {
+                    "launched": created,
+                    "alerted": False,
+                    "symbol": symbol,
+                    "fdv": fdv,
+                    "liq": liq
+                }
+                ready_queue.append(mint)
+                if len(ready_queue) > MAX_QUEUE:
+                    ready_queue.pop(0)
 
-            if added > 0:
+                log.info(f"NEW VIA MORALIS → {symbol} | {short_addr(mint)} | {int(age_sec)}s old | FDV ${fdv:,.0f}")
+                added += 1
+
+            if added:
                 log.info(f"Added {added} new tokens this cycle")
-            else:
-                log.info("No new launches (<12 min) this cycle")
 
     except Exception as e:
         log.error(f"Moralis poll error: {e}")
-        
-async def get_tx(sig, sess):
-    payload = {"jsonrpc": "2.0", "id": 1, "method": "getTransaction", "params": [sig, {"encoding": "jsonParsed"}]}
-    async with sess.post(SOLANA_RPC, json=payload, timeout=10) as r:
-        if r.status != 200: return None
-        return (await r.json()).get("result")
 
-async def get_pump_curve(mint: str, sess: aiohttp.ClientSession) -> dict:
+async def get_pump_curve(mint: str, sess):
     try:
         url = f"https://public-api.birdeye.so/defi/token_overview?address={mint}"
-        headers = {"X-API-KEY": "free"}  # Birdeye free tier
-        async with sess.get(url, headers=headers, timeout=8) as r:
+        async with sess.get(url, timeout=8) as r:
             if r.ok:
-                data = await r.json()
+                d = await r.json()
+                data = d.get("data", {})
                 return {
-                    "fdv_usd": data.get("data", {}).get("mc", 0),
-                    "liquidity_usd": data.get("data", {}).get("liquidity", 0),
-                    "volume_5m": data.get("data", {}).get("v24hUSD", 0) / 4.8  # Approx 5m from 24h
+                    "fdv_usd": data.get("mc", 0),
+                    "liquidity_usd": data.get("liquidity", 0),
+                    "volume_5m": data.get("v24hUSD", 0) / 288  # 24h → 5m
                 }
     except:
         pass
     return {"fdv_usd": 0, "liquidity_usd": 0, "volume_5m": 0}
 
-async def is_locked(mint, client):
+async def process_token(mint: str, sess, now: float):
     try:
-        supply = await client.get_token_supply(mint)
-        return supply.value.ui_amount == 0 and supply.value.mint_authority is None
-    except:
-        return False
-
-async def has_social_buzz(mint, sess):
-    # Placeholder: implement Twitter API
-    return 2
-
-async def process_token(mint: str, sess: aiohttp.ClientSession, now: float):
-    try:
-        # 1. Skip if older than 10 minutes
         if now - seen[mint] > 600:
-            log.info(f"SKIPPED {short_addr(mint)} — too old")
             return
 
-        # 2. Grab pre-filled data from DexScreener
         info = token_db.get(mint, {})
         symbol = info.get("symbol", "UNKNOWN")
-        dex_fdv = info.get("fdv", 0)
-
-        # 3. Instant reject if already too big (saves RPC calls)
-        if dex_fdv > MAX_FDVS_SNIPE:
-            log.info(f"SKIPPED {short_addr(mint)} — FDV ${dex_fdv:,.0f} too high (DexScreener)")
+        if info.get("fdv", 0) > MAX_FDVS_SNIPE:
             return
 
-        # 4. Wait at least 25 seconds after launch (avoid fake early pumps + give liquidity time)
         if now - seen[mint] < 25:
-            return  # will re-check next loop
+            return
 
-        # 5. Get fresh Pump.fun curve data (most accurate FDV/liq/vol)
         curve = await get_pump_curve(mint, sess)
-        fdv_usd = curve.get("fdv_usd", dex_fdv) or dex_fdv
-        liq_usd = curve.get("liquidity_usd", 0)
-        vol_5m = curve.get("volume_5m", 0)
+        fdv = curve.get("fdv_usd", info.get("fdv", 0))
+        liq = curve.get("liquidity_usd", 0)
+        vol = curve.get("volume_5m", 0)
 
-        # 6. Final strict filters
-        if not (MIN_FDVS_SNIPE <= fdv_usd <= MAX_FDVS_SNIPE):
-            log.info(f"SKIPPED {short_addr(mint)} — FDV ${fdv_usd:,.0f} out of range")
+        if not (MIN_FDVS_SNIPE <= fdv <= MAX_FDVS_SNIPE):
+            return
+        if liq < LIQ_FDV_RATIO * fdv:
+            return
+        if vol > MAX_VOL_SNIPE:
             return
 
-        if liq_usd < LIQ_FDV_RATIO * fdv_usd:
-            log.info(f"SKIPPED {short_addr(mint)} — low liq (${liq_usd:,.0f} < {LIQ_FDV_RATIO:.0%} FDV)")
-            return
-
-        if vol_5m > MAX_VOL_SNIPE:
-            log.info(f"SKIPPED {short_addr(mint)} — high 5m volume (${vol_5m:,.0f})")
-            return
-
-        # 7. Holders check (real distribution)
         async with AsyncClient(random.choice(RPC_POOL)) as client:
             try:
                 holders = await client.get_token_largest_accounts(mint)
-                holder_count = sum(1 for acc in holders.value if acc.ui_amount > 0)
-                if holder_count < MIN_HOLDERS:
-                    log.info(f"SKIPPED {short_addr(mint)} — only {holder_count} holders")
+                count = sum(1 for a in holders.value if a.ui_amount > 0)
+                if count < MIN_HOLDERS:
                     return
             except:
-                return  # RPC fail → skip
+                return
 
-        # 8. Optional: Social buzz (you can keep your placeholder)
-        if await has_social_buzz(mint, sess) < 2:
-            return
-
-        # 9. GOLD ALERT! — Only fires on real 10–100x potential
         if not info.get("alerted"):
             token_db[mint]["alerted"] = True
             age_min = int((now - seen[mint]) // 60)
-            log.info(f"GOLD ALERT → {symbol} | {short_addr(mint)} | FDV ${fdv_usd:,.0f} | Age {age_min}m")
-            await broadcast_alert(mint, symbol, fdv_usd, age_min)
+            log.info(f"GOLD ALERT → {symbol} | {short_addr(mint)} | ${fdv:,.0f}")
+            await broadcast_alert(mint, symbol, fdv, age_min)
 
     except Exception as e:
-        log.error(f"process_token() crashed on {short_addr(mint)}: {e}")
+        log.error(f"process_token error: {e}")
 
 async def premium_pump_scanner():
-    global ws_conn
-    program_id = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"  # Confirmed active Nov 2025
-    ws_url = os.getenv("SOLANA_WS_RPC", "wss://api.mainnet-beta.solana.com")  # Add to .env for better RPC
-
-    while True:  # Reconnect loop
-        try:
-            log.info("Starting WS logsSubscribe to Pump.fun program...")
-            async with connect(ws_url) as websocket:
-                ws_conn = websocket
-
-                # Subscribe to logs mentioning Pump program (low CPU, event-driven)
-                subscribe_req = {
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "logsSubscribe",
-                    "params": [
-                        {"mentions": [program_id]},
-                        {"commitment": "processed"}  # Fastest
-                    ]
-                }
-                await websocket.send(json.dumps(subscribe_req))
-                log.info("Subscribed to Pump.fun logs — waiting for 'create' events...")
-
-                async for msg in websocket:
-                    try:
-                        data = json.loads(msg)
-                        if "params" not in data or "result" not in data["params"]:
-                            continue
-
-                        logs = data["params"]["result"]["value"]["logs"]
-                        sig = data["params"]["result"]["value"]["signature"]
-
-                        # Detect create instruction (2025 format)
-                        if not any("create" in log.lower() for log in logs):
-                            continue
-
-                        log.info(f"Create event detected! Fetching TX {sig[:8]}...")
-                        async with aiohttp.ClientSession() as sess:  # Fresh session per event
-                            tx = await get_tx(sig, sess)  # Your existing func
-                            if not tx:
-                                continue
-
-                            mint = extract_mint_from_tx(tx)  # Your existing func (tweak below if needed)
-                            if mint and mint not in seen:
-                                now = time.time()
-                                seen[mint] = now
-                                token_db[mint] = {"launched": now, "alerted": False}
-                                ready_queue.append(mint)
-                                if len(ready_queue) > MAX_QUEUE:
-                                    ready_queue.pop(0)
-                                log.info(f"NEW LAUNCH via WS → {short_addr(mint)}")
-
-                    except json.JSONDecodeError:
-                        continue
-                    except Exception as e:
-                        log.error(f"WS msg error: {e}")
-
-        except Exception as e:
-            log.error(f"WS disconnected: {e} — reconnecting in 10s...")
-            await asyncio.sleep(10)
-
-# Tweak your existing extract_mint_from_tx for 2025 logs (more robust)
-def extract_mint_from_tx(tx: dict) -> str | None:
-    # Method 1: Look in parsed instructions for initializeMint
-    try:
-        for instr in tx.get("transaction", {}).get("message", {}).get("instructions", []):
-            parsed = instr.get("parsed")
-            if parsed and parsed.get("type") == "initializeMint":
-                return parsed["info"].get("mint")
-    except:
-        pass
-
-    # Method 2: Pump accounts (updated for 2025: mint often in accounts[4] or postTokenBalances)
-    try:
-        accounts = tx.get("transaction", {}).get("message", {}).get("accountKeys", [])
-        for i, acc in enumerate(accounts):
-            if i in [3, 4] and len(acc) == 44:  # Base64 pubkey length
-                return acc
-
-        # Fallback: Scan postTokenBalances for new mint with supply ~1B (Pump standard)
-        meta = tx.get("meta", {})
-        post_bal = meta.get("postTokenBalances", [])
-        for bal in post_bal:
-            if bal.get("uiTokenAmount", {}).get("uiAmount", 0) == 1000000000.0:  # 1B tokens
-                return bal.get("mint")
-    except:
-        pass
-
-    return None
+    async with aiohttp.ClientSession() as sess:
+        while True:
+            log.info("SCANNER TICK – checking Moralis")
+            await get_new_pairs(sess)
+            now = time.time()
+            for mint in list(ready_queue)[:8]:  # Only 8 per cycle = low CPU
+                await process_token(mint, sess, now)
+            await asyncio.sleep(45)  # 45s = perfect for Railway free tier
 
 # --------------------------------------------------------------------------- #
 # SAFE EDIT (PREVENT CRASH ON EDIT)
@@ -749,6 +587,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def main():
     global app
     app = Application.builder().token(BOT_TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu_cmd))
     app.add_handler(CommandHandler("setbsc", setbsc))
@@ -757,10 +596,12 @@ async def main():
 
     await app.initialize()
     await app.start()
+
     asyncio.create_task(premium_pump_scanner())
     asyncio.create_task(auto_save())
     asyncio.create_task(check_auto_sell())
-    log.info("ONION X – HIGH-IMPACT LIVE")
+
+    log.info("ONION X – LIVE ON RAILWAY (Moralis + Low CPU)")
     await app.updater.start_polling()
     await asyncio.Event().wait()
 
