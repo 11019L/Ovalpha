@@ -47,9 +47,9 @@ if not MORALIS_API_KEY:
 
 # Filters
 MIN_FDVS_SNIPE = 500
-MAX_FDVS_SNIPE = 40000
-MAX_VOL_SNIPE = 1800
-LIQ_FDV_RATIO = 0.5
+MAX_FDVS_SNIPE = 120000
+MAX_VOL_SNIPE = 2800
+LIQ_FDV_RATIO = 0.4
 MIN_HOLDERS = 15
 MAX_QUEUE = 500
 
@@ -468,46 +468,70 @@ async def get_pump_curve(mint: str, sess):
 
 async def process_token(mint: str, sess, now: float):
     try:
+        # 1. Too old?
         if now - seen[mint] > 600:
+            log.info(f"SKIPPED {short_addr(mint)} — older than 10 min")
             return
 
         info = token_db.get(mint, {})
         symbol = info.get("symbol", "UNKNOWN")
-        if info.get("fdv", 0) > MAX_FDVS_SNIPE:
+        initial_fdv = info.get("fdv", 0)
+
+        # 2. Instant FDV cap (from Moralis data)
+        if initial_fdv > MAX_FDVS_SNIPE:
+            log.info(f"SKIPPED {short_addr(mint)} — initial FDV ${initial_fdv:,.0f} > ${MAX_FDVS_SNIPE:,}")
             return
 
-        if now - seen[mint] < 25:
-            return
+        # 3. Too early?
+        age_sec = int(now - seen[mint])
+        if age_sec < 7:  # ← lowered to 7s for 2025 speed
+            return  # silently re-check later
 
+        # 4. Fresh data from Birdeye
         curve = await get_pump_curve(mint, sess)
-        fdv = curve.get("fdv_usd", info.get("fdv", 0))
+        fdv = curve.get("fdv_usd", initial_fdv)
         liq = curve.get("liquidity_usd", 0)
         vol = curve.get("volume_5m", 0)
 
+        # 5. FDV range check
         if not (MIN_FDVS_SNIPE <= fdv <= MAX_FDVS_SNIPE):
-            return
-        if liq < LIQ_FDV_RATIO * fdv:
-            return
-        if vol > MAX_VOL_SNIPE:
+            log.info(f"SKIPPED {short_addr(mint)} — FDV ${fdv:,.0f} out of range ({MIN_FDVS_SNIPE:,}–{MAX_FDVS_SNIPE:,}) | age {age_sec}s")
             return
 
+        # 6. Liquidity ratio
+        liq_ratio = liq / fdv if fdv > 0 else 0
+        if liq < LIQ_FDV_RATIO * fdv:
+            log.info(f"SKIPPED {short_addr(mint)} — low liq ${liq:,.0f} ({liq_ratio:.1%} < {LIQ_FDV_RATIO:.0%}) | age {age_sec}s")
+            return
+
+        # 7. Volume too high
+        if vol > MAX_VOL_SNIPE:
+            log.info(f"SKIPPED {short_addr(mint)} — high volume ${vol:,.0f} > ${MAX_VOL_SNIPE:,} | age {age_sec}s")
+            return
+
+        # 8. Holders check
         async with AsyncClient(random.choice(RPC_POOL)) as client:
             try:
-                holders = await client.get_token_largest_accounts(mint)
-                count = sum(1 for a in holders.value if a.ui_amount > 0)
-                if count < MIN_HOLDERS:
+                holders_resp = await client.get_token_largest_accounts(mint)
+                holder_count = sum(1 for a in holders_resp.value if a.ui_amount > 0)
+                if holder_count < MIN_HOLDERS:
+                    log.info(f"SKIPPED {short_addr(mint)} — only {holder_count} holders (need {MIN_HOLDERS}+) | age {age_sec}s")
                     return
-            except:
+            except Exception as e:
+                log.warning(f"SKIPPED {short_addr(mint)} — holders RPC failed: {e}")
                 return
 
+        # SUCCESS — GOLD ALERT!
         if not info.get("alerted"):
             token_db[mint]["alerted"] = True
-            age_min = int((now - seen[mint]) // 60)
-            log.info(f"GOLD ALERT → {symbol} | {short_addr(mint)} | ${fdv:,.0f}")
+            age_min = age_sec // 60
+            log.info(f"{'*' * 20} GOLD ALERT {'*' * 20}")
+            log.info(f"→ {symbol} | {short_addr(mint)} | FDV ${fdv:,.0f} | Liq ${liq:,.0f} | Age {age_sec}s")
+            log.info(f"{'*' * 53}")
             await broadcast_alert(mint, symbol, fdv, age_min)
 
     except Exception as e:
-        log.error(f"process_token error: {e}")
+        log.error(f"process_token crashed on {short_addr(mint)}: {e}")
 
 async def premium_pump_scanner():
     async with aiohttp.ClientSession() as sess:
