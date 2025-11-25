@@ -11,7 +11,10 @@ load_dotenv()
 import aiohttp
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, filters
+from telegram.ext import (
+    Application, CommandHandler, CallbackQueryHandler,
+    ContextTypes, filters
+)
 
 # ============================= CONFIG =============================
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -20,15 +23,13 @@ log = logging.getLogger("onion_test")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("Set BOT_TOKEN in .env")
-BOT_USERNAME = os.getenv("BOT_USERNAME", "onionx_test_bot")
-FEE_WALLET = "So11111111111111111111111111111111111111112"  # WSOL
 
-# Relaxed for testing — will catch 90%+ of new Pump.fun tokens
+# Relaxed filters for testing
 MIN_FDVS_SNIPE = 300
-MAX_FDVS_SNIPE = 400_000
-MAX_VOL_SNIPE = 15_000
-LIQ_FDV_RATIO = 0.15
-MIN_HOLDERS = 8
+MAX_FDVS_SNIPE = 500_000
+MAX_VOL_SNIPE = 20_000
+LIQ_FDV_RATIO = 0.1
+MIN_HOLDERS = 5
 MAX_QUEUE = 200
 
 # ============================= STATE =============================
@@ -36,24 +37,9 @@ seen = set()
 token_db = {}
 ready_queue = []
 users = {}
-data = {"users": {}, "revenue": 0, "total_trades": 0}
-DATA_FILE = Path("test_data.json")
-
-def load_data():
-    if DATA_FILE.exists():
-        try:
-            return json.loads(DATA_FILE.read_text())
-        except:
-            pass
-    return data
-
-data = load_data()
-users = data["users"]
-app = None
 
 # ============================= HELPERS =============================
 def short_addr(a): return f"{a[:6]}...{a[-4:]}" if a and len(a) > 10 else "—"
-def fmt_sol(v): return f"{v:.3f} SOL"
 
 # ============================= PUMPPORTAL (REAL-TIME 2025) =============================
 async def get_new_tokens(sess):
@@ -61,7 +47,6 @@ async def get_new_tokens(sess):
     try:
         async with sess.get(url, timeout=15) as r:
             if not r.ok:
-                log.warning(f"PumpPortal HTTP {r.status}")
                 return
             raw = await r.json()
             tokens = raw if isinstance(raw, list) else raw.get("tokens", [])
@@ -71,13 +56,13 @@ async def get_new_tokens(sess):
                 mint = t.get("mint") or t.get("tokenAddress")
                 if not mint or mint in seen:
                     continue
-                created = t.get("created_timestamp") or now - 60
+                created = t.get("created_timestamp", now - 60)
                 if now - created > 300:  # < 5 min old
                     continue
 
                 fdv = float(t.get("market_cap_usd") or t.get("fdv_usd") or 0)
                 liq = float(t.get("liquidity_usd") or 0)
-                symbol = t.get("symbol", "???")[:10]
+                symbol = (t.get("symbol") or "???")[:12]
 
                 seen.add(mint)
                 token_db[mint] = {
@@ -91,97 +76,51 @@ async def get_new_tokens(sess):
                 if len(ready_queue) > MAX_QUEUE:
                     ready_queue.pop(0)
 
-                log.info(f"NEW → {symbol} | {short_addr(mint)} | FDV ${fdv:,.0f} | Age {int(now-created)}s")
+                log.info(f"NEW → {symbol} | {short_addr(mint)} | FDV ${fdv:,.0f}")
                 added += 1
             if added:
-                log.info(f"Added {added} fresh tokens")
+                log.info(f"PumpPortal added {added} new tokens")
     except Exception as e:
         log.error(f"PumpPortal error: {e}")
 
-# ============================= FILTER & ALERT =============================
+# ============================= PROCESS & ALERT =============================
 async def process_queue():
     now = time.time()
-    for mint in ready_queue[:10]:  # Process up to 10 per cycle
-        try:
-            info = token_db.get(mint)
-            if not info or info["alerted"]:
-                continue
+    for mint in ready_queue[:10]:
+        info = token_db.get(mint)
+        if not info or info["alerted"]:
+            continue
+        if now - info["launched"] < 6:
+            continue
 
-            age = int(now - info["launched"])
-            if age < 6:  # Wait a few seconds
-                continue
-            if age > 600:
-                continue
+        fdv = info["fdv"]
+        liq = info["liq"]
+        if not (MIN_FDVS_SNIPE <= fdv <= MAX_FDVS_SNIPE):
+            continue
+        if liq < LIQ_FDV_RATIO * fdv:
+            continue
 
-            fdv = info["fdv"]
-            liq = info["liq"]
-
-            if not (MIN_FDVS_SNIPE <= fdv <= MAX_FDVS_SNIPE):
-                continue
-            if liq < LIQ_FDV_RATIO * fdv:
-                continue
-
-            # SUCCESS → GOLD ALERT
-            info["alerted"] = True
-            sym = info["symbol"]
-            log.info(f"{'*' * 15} GOLD ALERT → {sym} | {short_addr(mint)} | ${fdv:,.0f} {'*' * 15}")
-            await broadcast_alert(mint, sym, fdv)
-
-        except Exception as e:
-            log.error(f"Process error {short_addr(mint)}: {e}")
+        info["alerted"] = True
+        log.info(f"{'*' * 20} GOLD ALERT → {info['symbol']} | {short_addr(mint)} | ${fdv:,.0f} {'*' * 20}")
+        await broadcast_alert(mint, info["symbol"], fdv)
 
 async def broadcast_alert(mint: str, symbol: str, fdv: float):
     msg = (
-        "<b>GOLD ALERT (TEST MODE)</b>\n\n"
+        "<b>GOLD ALERT (TEST BOT)</b>\n\n"
         f"<b>{symbol}</b>\n"
         f"CA: <code>{mint}</code>\n"
         f"FDV: <code>${fdv:,.0f}</code>\n\n"
-        "This is a TEST build — alerts are working!"
+        "Your sniper is ALIVE!"
     )
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("Copy CA", callback_data=f"copy_{mint}")],
-        [InlineKeyboardButton("Refresh Menu", callback_data="menu")]
+        [InlineKeyboardButton("Menu", callback_data="menu")]
     ])
-    for uid, u in list(users.items()):
+    for uid, u in users.items():
         try:
             await app.bot.send_message(u["chat_id"], msg, reply_markup=kb, parse_mode=ParseMode.HTML)
         except Exception as e:
-            log.warning(f"Failed to send to {uid}: {e}")
-
-# ============================= COMMANDS & UI =============================
-async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    chat_id = update.effective_chat.id
-    if uid not in users:
-        users[uid] = {"chat_id": chat_id, "free_alerts": 999}  # Unlimited in test mode
-    users[uid]["chat_id"] = chat_id
-    await update.message.reply_text(
-        "<b>ONION X TEST BOT IS LIVE</b>\n\n"
-        "You will receive a GOLD ALERT within 1–3 minutes when a new Pump.fun token launches.\n\n"
-        "Use /menu anytime.",
-        parse_mode=ParseMode.HTML
-    )
-
-async def menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    kb = [[InlineKeyboardButton("Force Test Alert", callback_data="test_alert")]]
-    await update.message.reply_text("TEST MENU", reply_markup=InlineKeyboardMarkup(kb))
-
-async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    uid = q.from_user.id
-    data = q.data
-
-    if data == "menu":
-        await q.edit_message_text("Menu refreshed", reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Force Test Alert", callback_data="test_alert")]
-        ]))
-    elif data == "test_alert":
-        await broadcast_alert("So11111111111111111111111111111111111111112", "TESTCOIN", 42069)
-    elif data.startswith("copy_"):
-        mint = data.split("_", 1)[1]
-        await q.edit_message_text(f"<code>{mint}</code>\nCopied to clipboard!", parse_mode=ParseMode.HTML)
+            log.warning(f"Send failed to {uid}: {e}")
 
 # ============================= SCANNER LOOP =============================
 async def scanner():
@@ -191,25 +130,53 @@ async def scanner():
             await process_queue()
             await asyncio.sleep(12)
 
+# ============================= HANDLERS =============================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    chat_id = update.effective_chat.id
+    users[uid] = {"chat_id": chat_id}
+    await update.message.reply_text(
+        "<b>ONION X TEST BOT IS LIVE</b>\n\n"
+        "You will receive a real GOLD ALERT in the next 30–120 seconds.\n"
+        "Just wait...",
+        parse_mode=ParseMode.HTML
+    )
 
-async def main():
-    global app
-    app = Application.builder().token(BOT_TOKEN).build()
+async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    kb = [[InlineKeyboardButton("Force Test Alert", callback_data="test")]]
+    await update.message.reply_text("Test Menu", reply_markup=InlineKeyboardMarkup(kb))
+
+async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    if q.data == "test":
+        await broadcast_alert("So11111111111111111111111111111111111111112", "TESTCOIN", 69696)
+    elif q.data == "menu":
+        await q.edit_message_text("Menu refreshed")
+    elif q.data.startswith("copy_"):
+        mint = q.data.split("_", 1)[1]
+        await q.edit_message_text(f"<code>{mint}</code>\nCopied!", parse_mode=ParseMode.HTML)
+
+# ============================= BUILD & RUN =============================
+def main():
+    builder = Application.builder().token(BOT_TOKEN)
+    app = builder.build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu))
     app.add_handler(CallbackQueryHandler(button))
 
-    # Start scanner background task
-    app.job_queue.run_once(lambda _: None, 1)  # dummy to initialize job_queue
+    # Start scanner in background
+    app.job_queue.run_once(lambda ctx: None, 0)  # force job_queue init
     asyncio.create_task(scanner())
 
     log.info("ONION X TEST BOT STARTED – Waiting for new Pump.fun tokens...")
-    # Nothing else here – run_polling() will start the loop
-
+    
+    # THIS IS THE ONLY CORRECT WAY IN 2025
+    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
 # =============================================================================
-# THIS IS THE ONLY LINE YOU NEED AT THE BOTTOM
+# RUN IT
 # =============================================================================
 if __name__ == "__main__":
-    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
+    main()        # ← No asyncio.run()! app.run_polling() owns the loop
