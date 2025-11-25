@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import os
 import asyncio
 import json
@@ -10,11 +11,15 @@ load_dotenv()
 import aiohttp
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
-from telegram.ext import (
-    Application, CommandHandler, CallbackQueryHandler,
-    ContextTypes, filters
-)
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, filters
 
+# ============================= CONFIG =============================
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+log = logging.getLogger("onion_test")
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise ValueError("Set BOT_TOKEN in .env")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "onionx_test_bot")
 FEE_WALLET = "So11111111111111111111111111111111111111112"  # WSOL
 
