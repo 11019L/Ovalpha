@@ -189,9 +189,9 @@ async def scanner():
         while True:
             await get_new_tokens(sess)
             await process_queue()
-            await asyncio.sleep(12)  # Fast for testing
+            await asyncio.sleep(12)
 
-# ============================= MAIN =============================
+
 async def main():
     global app
     app = Application.builder().token(BOT_TOKEN).build()
@@ -200,10 +200,16 @@ async def main():
     app.add_handler(CommandHandler("menu", menu))
     app.add_handler(CallbackQueryHandler(button))
 
+    # Start scanner background task
+    app.job_queue.run_once(lambda _: None, 1)  # dummy to initialize job_queue
     asyncio.create_task(scanner())
 
     log.info("ONION X TEST BOT STARTED – Waiting for new Pump.fun tokens...")
-    await app.run_polling()
+    # Nothing else here – run_polling() will start the loop
 
+
+# =============================================================================
+# THIS IS THE ONLY LINE YOU NEED AT THE BOTTOM
+# =============================================================================
 if __name__ == "__main__":
-    asyncio.run(main())
+    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
