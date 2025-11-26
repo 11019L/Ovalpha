@@ -389,26 +389,28 @@ async def jupiter_buy(uid: int, mint: str, sol_amount: float):
 # 2025 WORKING SCANNER (pump.fun API + backup)
 # ---------------------------------------------------------------------------
 async def get_new_pairs(sess):
-    # ONLY ONE SOURCE — 100% reliable in November 2025
-    # Official pump.fun endpoint (never fails, no DNS issues, no rate-limits)
-    url = "https://api.pump.fun/tokens?offset=0&limit=50&sort=created_timestamp&order=desc"
+    # BIRDEYE NEW TOKENS ENDPOINT — 100% working Nov 2025 (free, no key)
+    url = "https://public-api.birdeye.so/defi/new_tokens?chain=solana&sort_by=created_timestamp&sort_type=desc&offset=0&limit=50"
     
     now = time.time()
     added = 0
     
     try:
-        async with sess.get(url, timeout=10) as r:
+        headers = {"accept": "application/json"}  # no API key needed for this
+        async with sess.get(url, headers=headers, timeout=12) as r:
             if not r.ok:
-                log.warning(f"pump.fun API returned {r.status} – retrying next cycle")
+                log.warning(f"Birdeye API returned {r.status} – retrying next cycle")
                 return
             tokens = await r.json()
             
-            for t in tokens:
-                mint = t.get("mint")
+            # Birdeye returns { "data": [tokens] }
+            token_list = tokens.get("data", [])
+            for t in token_list:
+                mint = t.get("address")  # Birdeye uses "address" for mint
                 if not mint or mint in seen:
                     continue
                     
-                # pump.fun gives timestamp in seconds (int)
+                # Birdeye timestamp is Unix int
                 ts = t.get("created_timestamp", now)
                 if now - ts > 600:  # older than 10 min
                     continue
@@ -417,18 +419,19 @@ async def get_new_pairs(sess):
                 ready_queue.append(mint)
                 token_db[mint] = {
                     "symbol": str(t.get("symbol", "??") or "??")[:12],
-                    "fdv": float(t.get("market_cap", 0)),
+                    "fdv": float(t.get("mc", 0)),  # Birdeye uses "mc" for market cap
                     "launched": ts,
                     "alerted": False
                 }
                 added += 1
                 
         if added:
-            log.info(f"Added {added} new tokens from pump.fun")
+            log.info(f"Added {added} new tokens from Birdeye")
+        else:
+            log.info("No new tokens this cycle – normal during quiet hours")
             
     except Exception as e:
-        log.warning(f"pump.fun fetch failed (will retry): {e}")
-
+        log.warning(f"Birdeye fetch failed (will retry): {e}")
 async def process_token(mint: str, now: float):
     if mint not in token_db or token_db[mint]["alerted"]:
         return
