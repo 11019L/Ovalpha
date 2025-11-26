@@ -389,71 +389,74 @@ async def jupiter_buy(uid: int, mint: str, sol_amount: float):
 # 2025 WORKING SCANNER (pump.fun API + backup)
 # ---------------------------------------------------------------------------
 async def get_new_pairs(sess):
-    # MORALIS PUMPFUN/NEW — 100% working Nov 2025 (free tier: 1M requests/month)
-    # Requires MORALIS_API_KEY in .env — sign up free at moralis.io
-    global MORALIS_API_KEY  # Explicit global access to fix NameError
+    global MORALIS_API_KEY
     
     if not MORALIS_API_KEY:
-        log.warning("MORALIS_API_KEY missing from .env — skipping scanner (sign up free at moralis.io)")
+        log.warning("MORALIS_API_KEY missing – scanner paused")
+        await asyncio.sleep(30)
         return
     
     url = "https://solana-gateway.moralis.io/token/mainnet/exchange/pumpfun/new?limit=50"
-    
     now = time.time()
     added = 0
     
     try:
-        headers = {
-            "accept": "application/json",
-            "X-API-Key": MORALIS_API_KEY
-        }
+        headers = {"accept": "application/json", "X-API-Key": MORALIS_API_KEY}
         async with sess.get(url, headers=headers, timeout=12) as r:
             if not r.ok:
-                log.warning(f"Moralis API returned {r.status} – retrying next cycle")
+                log.warning(f"Moralis returned {r.status}")
                 return
-            tokens = await r.json()
+            data = await r.json()
+            tokens = data.get("result", [])
             
-            # Moralis returns { "result": [tokens] }
-            token_list = tokens.get("result", [])
-            if not token_list:
-                log.info("No new tokens this cycle – normal during quiet hours")
-                return
-                
-            for t in token_list:
+            for t in tokens:
                 mint = t.get("tokenAddress")
                 if not mint or mint in seen:
                     continue
-                    
-                # Moralis "createdAt" is ISO string — parse to Unix timestamp
+
+                # SAFE FDV PARSING – handles null/None
+                fdv_raw = t.get("fullyDilutedValuation")
+                try:
+                    fdv = float(fdv_raw) if fdv_raw is not None else 0.0
+                except (TypeError, ValueError):
+                    fdv = 0.0
+
+                # Skip garbage tokens with 0 FDV
+                if fdv < 1000:
+                    continue
+
+                # SAFE TIMESTAMP PARSING
                 created_str = t.get("createdAt")
                 ts = now
                 if created_str:
                     try:
-                        # Handle ISO with Z (UTC)
                         ts = datetime.fromisoformat(created_str.replace("Z", "+00:00")).timestamp()
-                    except Exception as parse_e:
-                        log.debug(f"Timestamp parse failed for {mint}: {parse_e}")
-                        ts = now
-                        
-                if now - ts > 600:  # older than 10 min
+                    except:
+                        pass
+
+                if now - ts > 600:
                     continue
-                    
+
                 seen[mint] = now
                 ready_queue.append(mint)
                 token_db[mint] = {
-                    "symbol": str(t.get("symbol", "??") or "??")[:12],
-                    "fdv": float(t.get("fullyDilutedValuation", 0)),  # Exact field from Moralis
+                    "symbol": str(t.get("symbol", "??") or "??")[:15],
+                    "fdv": fdv,
                     "launched": ts,
-                    "alerted": False
+                    "alerted": False,
+                    # Optional extra fields if you want them later
+                    "liquidity": float(t.get("liquidity", 0)) if t.get("liquidity") else 0,
+                    "vol_5m": 0,  # placeholder – can be updated later
+                    "holders": 0
                 }
                 added += 1
-                log.info(f"NEW VIA MORALIS → {token_db[mint]['symbol']} | {short_addr(mint)} | ${token_db[mint]['fdv']:,.0f} | {int(now - ts)}s old")
+                log.info(f"NEW → {token_db[mint]['symbol']} | {short_addr(mint)} | ${fdv:,.0f}")
+
+            if added:
+                log.info(f"Added {added} clean tokens from Moralis")
                 
-        if added:
-            log.info(f"Added {added} new tokens from Moralis Pump.fun")
-            
     except Exception as e:
-        log.warning(f"Moralis fetch failed (will retry): {e}")
+        log.warning(f"Moralis error (retrying): {e}")
         
 async def process_token(mint: str, now: float):
     if mint not in token_db or token_db[mint]["alerted"]:
