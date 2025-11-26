@@ -621,7 +621,14 @@ async def safe_edit(query, text, reply_markup=None):
 # ---------------------------------------------------------------------------
 async def main():
     global app
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN)\
+        .concurrent_updates(True)\
+        .read_timeout(30)\
+        .write_timeout(30)\
+        .connect_timeout(30)\
+        .pool_timeout(60)\
+        .build()
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu_cmd))
     app.add_handler(CommandHandler("setbsc", setbsc))
@@ -633,9 +640,6 @@ async def main():
     asyncio.create_task(premium_pump_scanner())
     asyncio.create_task(auto_save())
     asyncio.create_task(check_auto_sell())
-    log.info("ONION X 2025 – LIVE AND SNIPING")
+    log.info("ONION X 2025 – LIVE AND UNSTOPPABLE")
     await app.updater.start_polling()
     await asyncio.Event().wait()
-
-if __name__ == "__main__":
-    asyncio.run(main())
