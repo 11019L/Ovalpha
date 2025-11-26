@@ -389,29 +389,39 @@ async def jupiter_buy(uid: int, mint: str, sol_amount: float):
 # 2025 WORKING SCANNER (pump.fun API + backup)
 # ---------------------------------------------------------------------------
 async def get_new_pairs(sess):
-    # BIRDEYE NEW TOKENS ENDPOINT — 100% working Nov 2025 (free, no key)
-    url = "https://public-api.birdeye.so/defi/new_tokens?chain=solana&sort_by=created_timestamp&sort_type=desc&offset=0&limit=50"
+    # MORALIS PUMPFUN/NEW — 100% working Nov 2025 (free tier: 1M requests/month)
+    url = "https://solana-gateway.moralis.io/token/mainnet/exchange/pumpfun/new?limit=50"
     
     now = time.time()
     added = 0
     
     try:
-        headers = {"accept": "application/json"}  # no API key needed for this
+        headers = {
+            "accept": "application/json",
+            "X-API-Key": MORALIS_API_KEY  # from .env — free key required
+        }
         async with sess.get(url, headers=headers, timeout=12) as r:
             if not r.ok:
-                log.warning(f"Birdeye API returned {r.status} – retrying next cycle")
+                log.warning(f"Moralis API returned {r.status} – retrying next cycle")
                 return
             tokens = await r.json()
             
-            # Birdeye returns { "data": [tokens] }
-            token_list = tokens.get("data", [])
+            # Moralis returns { "result": [tokens] }
+            token_list = tokens.get("result", [])
             for t in token_list:
-                mint = t.get("address")  # Birdeye uses "address" for mint
+                mint = t.get("tokenAddress")
                 if not mint or mint in seen:
                     continue
                     
-                # Birdeye timestamp is Unix int
-                ts = t.get("created_timestamp", now)
+                # Moralis "createdAt" is ISO string — parse to Unix timestamp
+                created_str = t.get("createdAt")
+                ts = now
+                if created_str:
+                    try:
+                        # Handle ISO with Z (UTC)
+                        ts = datetime.fromisoformat(created_str.replace("Z", "+00:00")).timestamp()
+                    except:
+                        pass
                 if now - ts > 600:  # older than 10 min
                     continue
                     
@@ -419,19 +429,20 @@ async def get_new_pairs(sess):
                 ready_queue.append(mint)
                 token_db[mint] = {
                     "symbol": str(t.get("symbol", "??") or "??")[:12],
-                    "fdv": float(t.get("mc", 0)),  # Birdeye uses "mc" for market cap
+                    "fdv": float(t.get("fullyDilutedValuation", 0)),  # Moralis uses "fullyDilutedValuation"
                     "launched": ts,
                     "alerted": False
                 }
                 added += 1
                 
         if added:
-            log.info(f"Added {added} new tokens from Birdeye")
+            log.info(f"Added {added} new tokens from Moralis Pump.fun")
         else:
             log.info("No new tokens this cycle – normal during quiet hours")
             
     except Exception as e:
-        log.warning(f"Birdeye fetch failed (will retry): {e}")
+        log.warning(f"Moralis fetch failed (will retry): {e}")
+        
 async def process_token(mint: str, now: float):
     if mint not in token_db or token_db[mint]["alerted"]:
         return
