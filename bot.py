@@ -39,6 +39,7 @@ if not BOT_TOKEN:
 BOT_USERNAME = os.getenv("BOT_USERNAME", "onionx_bot")
 USDT_BSC_WALLET = os.getenv("USDT_BSC_WALLET", "0x0000000000000000000000000000000000000000")
 FEE_WALLET = os.getenv("FEE_WALLET", "So11111111111111111111111111111111111111112")  # your fee wallet
+MORALIS_API_KEY = os.getenv("MORALIS_API_KEY", "")
 
 # ---------------------------------------------------------------------------
 # 2025 FILTERS (REAL WORKING SETTINGS)
