@@ -51,12 +51,12 @@ MORALIS_API_KEY = os.getenv("MORALIS_API_KEY", "")
 #MAX_VOL_SNIPE    = 15_000
 #MIN_HOLDERS      = 6
 
-#TEST MODE (uncomment these 5 lines for 200+ alerts/hour to verify everything works)
- MIN_FDVS_SNIPE   = 100
- MAX_FDVS_SNIPE   = 9_999_999
- LIQ_FDV_RATIO    = 0.01
- MAX_VOL_SNIPE    = 999_999
- MIN_HOLDERS      = 1
+# === TESTING MODE — MAXIMUM ALERTS (use only for 5–15 minutes) ===
+MIN_FDVS_SNIPE   = 1          # $1 minimum
+MAX_FDVS_SNIPE   = 9_999_999  # $10M max (basically no cap)
+LIQ_FDV_RATIO    = 0.01       # 1% liquidity is enough
+MAX_VOL_SNIPE    = 999_999    # ignore volume
+MIN_HOLDERS      = 1
 
 RPC_POOL = [
     "https://api.mainnet-beta.solana.com",
