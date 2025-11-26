@@ -12,7 +12,12 @@ from pathlib import Path
 from dotenv import load_dotenv
 from datetime import datetime
 import logging
-logging.basicConfig(level=logging.INFO, force=True)  # ← ADD THIS LINE
+logging.basicConfig(
+    level=logging.INFO,
+    force=True,                                     # ← THIS IS THE KEY
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
+log = logging.getLogger(__name__)E
 load_dotenv()
 
 import aiohttp
