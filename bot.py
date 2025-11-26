@@ -51,12 +51,11 @@ MORALIS_API_KEY = os.getenv("MORALIS_API_KEY", "")
 #MAX_VOL_SNIPE    = 15_000
 #MIN_HOLDERS      = 6
 
-# === TESTING MODE — MAXIMUM ALERTS (use only for 5–15 minutes) ===
-MIN_FDVS_SNIPE   = 1          # $1 minimum
-MAX_FDVS_SNIPE   = 9_999_999  # $10M max (basically no cap)
-LIQ_FDV_RATIO    = 0.01       # 1% liquidity is enough
-MAX_VOL_SNIPE    = 999_999    # ignore volume
-MIN_HOLDERS      = 1
+MIN_FDVS_SNIPE   = 5_000       # $5k – low MC alpha (early gems)
+MAX_FDVS_SNIPE   = 2_000_000   # $2M – high MC (mid-pump flips)
+LIQ_FDV_RATIO    = 0.3        # ≥25% liquidity = safe exits
+MAX_VOL_SNIPE    = 25_000      # ≤$25k 5m volume = organic, not botted
+MIN_HOLDERS      = 10
 
 RPC_POOL = [
     "https://api.mainnet-beta.solana.com",
@@ -461,18 +460,83 @@ async def process_token(mint: str, now: float):
         return
     info = token_db[mint]
     age = int(now - info["launched"])
-    if age < 8 or age > 600:
-        return
-
     fdv = info["fdv"]
-    if not (MIN_FDVS_SNIPE <= fdv <= MAX_FDVS_SNIPE):
+    symbol = info["symbol"]
+
+    # === DYNAMIC AGE WINDOW (low MC = fast, high MC = momentum) ===
+    if fdv < 50_000:        # Ultra-early gems
+        if not (5 <= age <= 70):
+            return
+    else:                   # Mid-pump runners
+        if not (10 <= age <= 360):
+            return
+
+    # === CORE FILTERS (ALPHA ONLY) ===
+    if not (5_000 <= fdv <= 2_000_000):
+        return
+    if info.get("vol_5m", 0) > 25_000:
+        return
+    if info.get("holders", 0) < 5:
+        return
+    if info.get("liquidity", 0) < fdv * 0.25:
         return
 
-    token_db[mint]["alerted"] = True
-    log.info(f"{' GOLD ALERT ':*^60}")
-    log.info(f"{info['symbol']} | {short_addr(mint)} | ${fdv:,.0f} | {age}s old")
-    await broadcast_alert(mint, info["symbol"], fdv, age // 60)
+    # =============================================
+    # NUCLEAR ANTI-RUG FILTER (2025 EDITION)
+    # =============================================
+    lower_sym = symbol.lower().strip()
 
+    # 1. Blacklisted words (instant rug)
+    rug_words = ["scam", "rug", "fake", "test", "dev", "dead", "rip", "honeypot", "taxed", "airdrop", "free", "giveaway"]
+    if any(word in lower_sym for word in rug_words):
+        log.info(f"RUG BLOCKED (blacklist): {symbol} | {short_addr(mint)}")
+        return
+
+    # 2. Suspicious "dev" in name + low MC = 99% scam
+    if "dev" in lower_sym and fdv < 250_000:
+        log.info(f"RUG BLOCKED (dev name + low MC): {symbol}")
+        return
+
+    # 3. Overly long or spammy name (>15 chars usually trash)
+    if len(symbol) > 15:
+        log.info(f"RUG BLOCKED (long name): {symbol}")
+        return
+
+    # 4. Name starts/ends with garbage (common bot spam)
+    if symbol.startswith(("$", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ".", "-", "_")):
+        log.info(f"RUG BLOCKED (ugly prefix): {symbol}")
+        return
+    if symbol.endswith(("2", "3", "4", "5", "6", "7", "8", "9", "10", ".sol", ".pump")) and len(symbol) < 8:
+        log.info(f"RUG BLOCKED (lazy suffix): {symbol}")
+        return
+
+    # 5. Too many special characters = spam
+    special_count = sum(1 for c in symbol if c in "!@#$%^&*()_+-=[]{}|;':,.<>?/~`")
+    if special_count >= 3:
+        log.info(f"RUG BLOCKED (too many special chars): {symbol}")
+        return
+
+    # 6. All caps + short = bot spam
+    if symbol.isupper() and len(symbol) <= 6:
+        log.info(f"RUG BLOCKED (ALL CAPS spam): {symbol}")
+        return
+
+    # 7. Repeated letters (e.g. "PEPEPEPE", "GOOO", "XXXX") = trash
+    if any(symbol[i] == symbol[i+1] == symbol[i+2] for i in range(len(symbol)-2)):
+        log.info(f"RUG BLOCKED (repeated letters): {symbol}")
+        return
+
+    # =============================================
+    # SUCCESS — CLEAN ALPHA ALERT!
+    # =============================================
+    token_db[mint]["alerted"] = True
+    mc_type = "LOW MC GEM" if fdv < 50_000 else "HIGH MC RUNNER" if fdv > 500_000 else "MID MC ALPHA"
+    log.info(f"{' CLEAN ALPHA ':*^70}")
+    log.info(f"{mc_type} → {symbol} | {short_addr(mint)} | ${fdv:,.0f} | {age}s old")
+    log.info(f"{'='*70}")
+
+    await broadcast_alert(mint, symbol, fdv, age // 60)
+    
 async def premium_pump_scanner():
     async with aiohttp.ClientSession() as sess:
         while True:
