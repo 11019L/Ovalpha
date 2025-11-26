@@ -52,7 +52,7 @@ MORALIS_API_KEY = os.getenv("MORALIS_API_KEY", "")
 #MIN_HOLDERS      = 6
 
 #TEST MODE (uncomment these 5 lines for 200+ alerts/hour to verify everything works)
- MIN_FDVS_SNIPE   = 1
+ MIN_FDVS_SNIPE   = 100
  MAX_FDVS_SNIPE   = 9_999_999
  LIQ_FDV_RATIO    = 0.01
  MAX_VOL_SNIPE    = 999_999
