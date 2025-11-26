@@ -29,10 +29,6 @@ from jupiter_python_sdk.jupiter import Jupiter
 # ---------------------------------------------------------------------------
 # CONFIG & LOGGING
 # ---------------------------------------------------------------------------
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("onion")
-for lib in ("httpx", "httpcore", "telegram", "aiohttp"):
-    logging.getLogger(lib).setLevel(logging.WARNING)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
@@ -544,13 +540,16 @@ async def process_token(mint: str, now: float):
     
 async def premium_pump_scanner():
     async with aiohttp.ClientSession() as sess:
+        cycle = 0
         while True:
+            cycle += 1
+            log.info(f"ONION X HEARTBEAT | Cycle {cycle} | Queue: {len(ready_queue)} | Seen: {len(seen)}")
             await get_new_pairs(sess)
             now = time.time()
             for mint in ready_queue[:40]:
                 asyncio.create_task(process_token(mint, now))
             ready_queue[:] = ready_queue[40:]
-            await asyncio.sleep(18)  # 3.3× faster than old 45s
+            await asyncio.sleep(18)
 
 # ---------------------------------------------------------------------------
 # ALERTS
