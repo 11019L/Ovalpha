@@ -45,18 +45,18 @@ MORALIS_API_KEY = os.getenv("MORALIS_API_KEY", "")
 # 2025 FILTERS (REAL WORKING SETTINGS)
 # Test mode → comment the strict ones and uncomment the loose ones below
 # ---------------------------------------------------------------------------
-MIN_FDVS_SNIPE   = 70_000       # $70k
-MAX_FDVS_SNIPE   = 900_000      # $900k
-LIQ_FDV_RATIO    = 0.22
-MAX_VOL_SNIPE    = 15_000
-MIN_HOLDERS      = 6
+#MIN_FDVS_SNIPE   = 70_000       # $70k
+#MAX_FDVS_SNIPE   = 900_000      # $900k
+#LIQ_FDV_RATIO    = 0.22
+#MAX_VOL_SNIPE    = 15_000
+#MIN_HOLDERS      = 6
 
-# TEST MODE (uncomment these 5 lines for 200+ alerts/hour to verify everything works)
-# MIN_FDVS_SNIPE   = 1
-# MAX_FDVS_SNIPE   = 9_999_999
-# LIQ_FDV_RATIO    = 0.01
-# MAX_VOL_SNIPE    = 999_999
-# MIN_HOLDERS      = 1
+TEST MODE (uncomment these 5 lines for 200+ alerts/hour to verify everything works)
+ MIN_FDVS_SNIPE   = 1
+ MAX_FDVS_SNIPE   = 9_999_999
+ LIQ_FDV_RATIO    = 0.01
+ MAX_VOL_SNIPE    = 999_999
+ MIN_HOLDERS      = 1
 
 RPC_POOL = [
     "https://api.mainnet-beta.solana.com",
