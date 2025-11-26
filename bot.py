@@ -14,10 +14,10 @@ from datetime import datetime
 import logging
 logging.basicConfig(
     level=logging.INFO,
-    force=True,                                     # ← THIS IS THE KEY
+    force=True,
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
-log = logging.getLogger(__name__)E
+log = logging.getLogger(__name__)
 load_dotenv()
 
 import aiohttp
@@ -548,7 +548,7 @@ async def premium_pump_scanner():
         cycle = 0
         while True:
             cycle += 1
-            log.info(f"ONION X HEARTBEAT | Cycle {cycle} | Queue: {len(ready_queue)} | Seen: {len(seen)}")
+            log.info(f"ONION X ALIVE → Cycle {cycle} | Queue: {len(ready_queue)} | Seen: {len(seen)}")
             await get_new_pairs(sess)
             now = time.time()
             for mint in ready_queue[:40]:
