@@ -11,7 +11,8 @@ import base64
 from pathlib import Path
 from dotenv import load_dotenv
 from datetime import datetime
-
+import logging
+logging.basicConfig(level=logging.INFO, force=True)  # ← ADD THIS LINE
 load_dotenv()
 
 import aiohttp
