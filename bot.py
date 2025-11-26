@@ -51,11 +51,12 @@ MORALIS_API_KEY = os.getenv("MORALIS_API_KEY", "")
 #MAX_VOL_SNIPE    = 15_000
 #MIN_HOLDERS      = 6
 
-MIN_FDVS_SNIPE   = 5_000       # $5k – low MC alpha (early gems)
-MAX_FDVS_SNIPE   = 2_000_000   # $2M – high MC (mid-pump flips)
-LIQ_FDV_RATIO    = 0.3        # ≥25% liquidity = safe exits
-MAX_VOL_SNIPE    = 25_000      # ≤$25k 5m volume = organic, not botted
+MIN_FDVS_SNIPE   = 5_000
+MAX_FDVS_SNIPE   = 3_000_000     # ← now catches $2.9M mid-pump runners
+LIQ_FDV_RATIO    = 0.25
+MAX_VOL_SNIPE    = 40_000        # ← allow slightly higher volume for late entries
 MIN_HOLDERS      = 10
+MAX_AGE_SECONDS  = 600
 
 RPC_POOL = [
     "https://api.mainnet-beta.solana.com",
