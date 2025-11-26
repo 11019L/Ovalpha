@@ -390,6 +390,13 @@ async def jupiter_buy(uid: int, mint: str, sol_amount: float):
 # ---------------------------------------------------------------------------
 async def get_new_pairs(sess):
     # MORALIS PUMPFUN/NEW — 100% working Nov 2025 (free tier: 1M requests/month)
+    # Requires MORALIS_API_KEY in .env — sign up free at moralis.io
+    global MORALIS_API_KEY  # Explicit global access to fix NameError
+    
+    if not MORALIS_API_KEY:
+        log.warning("MORALIS_API_KEY missing from .env — skipping scanner (sign up free at moralis.io)")
+        return
+    
     url = "https://solana-gateway.moralis.io/token/mainnet/exchange/pumpfun/new?limit=50"
     
     now = time.time()
@@ -398,7 +405,7 @@ async def get_new_pairs(sess):
     try:
         headers = {
             "accept": "application/json",
-            "X-API-Key": MORALIS_API_KEY  # from .env — free key required
+            "X-API-Key": MORALIS_API_KEY
         }
         async with sess.get(url, headers=headers, timeout=12) as r:
             if not r.ok:
@@ -408,6 +415,10 @@ async def get_new_pairs(sess):
             
             # Moralis returns { "result": [tokens] }
             token_list = tokens.get("result", [])
+            if not token_list:
+                log.info("No new tokens this cycle – normal during quiet hours")
+                return
+                
             for t in token_list:
                 mint = t.get("tokenAddress")
                 if not mint or mint in seen:
@@ -420,8 +431,10 @@ async def get_new_pairs(sess):
                     try:
                         # Handle ISO with Z (UTC)
                         ts = datetime.fromisoformat(created_str.replace("Z", "+00:00")).timestamp()
-                    except:
-                        pass
+                    except Exception as parse_e:
+                        log.debug(f"Timestamp parse failed for {mint}: {parse_e}")
+                        ts = now
+                        
                 if now - ts > 600:  # older than 10 min
                     continue
                     
@@ -429,16 +442,15 @@ async def get_new_pairs(sess):
                 ready_queue.append(mint)
                 token_db[mint] = {
                     "symbol": str(t.get("symbol", "??") or "??")[:12],
-                    "fdv": float(t.get("fullyDilutedValuation", 0)),  # Moralis uses "fullyDilutedValuation"
+                    "fdv": float(t.get("fullyDilutedValuation", 0)),  # Exact field from Moralis
                     "launched": ts,
                     "alerted": False
                 }
                 added += 1
+                log.info(f"NEW VIA MORALIS → {token_db[mint]['symbol']} | {short_addr(mint)} | ${token_db[mint]['fdv']:,.0f} | {int(now - ts)}s old")
                 
         if added:
             log.info(f"Added {added} new tokens from Moralis Pump.fun")
-        else:
-            log.info("No new tokens this cycle – normal during quiet hours")
             
     except Exception as e:
         log.warning(f"Moralis fetch failed (will retry): {e}")
