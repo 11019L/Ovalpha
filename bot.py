@@ -629,47 +629,40 @@ async def safe_edit(query, text, reply_markup=None):
 # MAIN
 # ---------------------------------------------------------------------------
 async def main():
-    log.info("Starting main function")
+    print("=== Starting main function ===")
     
     global app
-    log.info("Creating Application instance")
     
-    app = Application.builder().token(BOT_TOKEN)\
-        .concurrent_updates(True)\
-        .read_timeout(30)\
-        .write_timeout(30)\
-        .connect_timeout(30)\
-        .pool_timeout(60)\
-        .build()
+    print("Creating Telegram application...")
+    app = Application.builder().token(BOT_TOKEN).build()
+    print("Telegram application created successfully")
     
-    log.info("Application instance created successfully")
-    
-    log.info("Adding handlers to application")
+    print("Adding command handlers...")
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("menu", menu_cmd))
-    app.add_handler(CommandHandler("setbsc", setbsc))
-    app.add_handler(CallbackQueryHandler(button))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    print("Command handlers added successfully")
     
-    log.info("All handlers added, initializing application")
+    print("Initializing application...")
     await app.initialize()
-    log.info("Application initialized successfully")
+    print("Application initialized successfully")
     
-    log.info("Starting application")
+    print("Starting application...")
     await app.start()
-    log.info("Application started successfully")
+    print("Application started successfully")
     
-    log.info("Starting background tasks")
-    asyncio.create_task(premium_pump_scanner())
-    asyncio.create_task(auto_save())
-    asyncio.create_task(check_auto_sell())
-    log.info("All background tasks started")
+    print("Bot is now ready to receive messages")
     
-    log.info("ONION X 2025 – LIVE AND READY")
-    
-    log.info("Starting message polling")
+    print("Starting message polling...")
     await app.updater.start_polling()
-    log.info("Message polling started successfully")
+    print("Message polling started successfully")
     
-    log.info("Bot is now running and waiting for events")
+    print("Bot is running and waiting for events")
     await asyncio.Event().wait()
+
+if __name__ == "__main__":
+    print("Bot startup beginning")
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        print(f"Fatal error during startup: {e}")
+        import traceback
+        traceback.print_exc()
