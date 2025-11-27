@@ -21,7 +21,20 @@ logging.basicConfig(
 logging.getLogger().info("LOGGING IS WORKING - This message should appear immediately after startup")
 
 log = logging.getLogger("onion")
+def validate_environment():
+    required_vars = ["BOT_TOKEN"]
+    missing_vars = []
+    
+    for var in required_vars:
+        if not os.getenv(var):
+            missing_vars.append(var)
+    
+    if missing_vars:
+        raise RuntimeError(f"Missing required environment variables: {', '.join(missing_vars)}")
+
+# Call validation right after load_dotenv()
 load_dotenv()
+validate_environment()
 
 import aiohttp
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -640,39 +653,55 @@ async def safe_edit(query, text, reply_markup=None):
 # MAIN
 # ---------------------------------------------------------------------------
 async def main():
-    print("Step 1: Starting main function")
-    
-    global app
-    
-    print("Step 2: Creating Application instance")
-    app = Application.builder().token(BOT_TOKEN).build()
-    print("Step 3: Application instance created successfully")
-    
-    print("Step 4: Adding handlers")
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("menu", menu_cmd))
-    app.add_handler(CommandHandler("setbsc", setbsc))
-    app.add_handler(CallbackQueryHandler(button))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    print("Step 5: All handlers added successfully")
-    
-    print("Step 6: Initializing application")
-    await app.initialize()
-    print("Step 7: Application initialized successfully")
-    
-    print("Step 8: Starting application")
-    await app.start()
-    print("Step 9: Application started successfully")
-    
-    print("Step 10: Starting background tasks")
-    asyncio.create_task(premium_pump_scanner())
-    asyncio.create_task(auto_save())
-    asyncio.create_task(check_auto_sell())
-    print("Step 11: All background tasks started")
-    
-    print("Step 12: Starting message polling")
-    await app.updater.start_polling()
-    print("Step 13: Message polling started successfully")
-    
-    print("Bot is now running")
-    await asyncio.Event().wait()
+    try:
+        print("Starting Onion X Bot...")
+        
+        global app
+        app = Application.builder().token(BOT_TOKEN).build()
+        print("Application created successfully")
+
+        # Add handlers
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(CommandHandler("menu", menu_cmd))
+        app.add_handler(CommandHandler("setbsc", setbsc))
+        app.add_handler(CallbackQueryHandler(button))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+        
+        print("All handlers have been added")
+
+        # Start the application
+        await app.initialize()
+        await app.start()
+        print("Application started successfully")
+
+        # Start background tasks
+        print("Starting background tasks...")
+        asyncio.create_task(premium_pump_scanner())
+        asyncio.create_task(auto_save())
+        asyncio.create_task(check_auto_sell())
+        print("All background tasks started")
+
+        # Start polling
+        print("Starting message polling...")
+        await app.updater.start_polling()
+        print("Bot is now running and polling for messages")
+
+        # Keep the bot running
+        await asyncio.Event().wait()
+        
+    except Exception as e:
+        print(f"ERROR: Bot failed to start: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+
+if __name__ == "__main__":
+    try:
+        print("Bot startup beginning...")
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("Bot was stopped by user")
+    except Exception as e:
+        print(f"Fatal error: {e}")
+        import traceback
+        traceback.print_exc()
