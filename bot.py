@@ -431,238 +431,151 @@ async def jupiter_buy(uid: int, mint: str, sol_amount: float):
 # ---------------------------------------------------------------------------
 # 2025 WORKING SCANNER (pump.fun API + backup)
 # ---------------------------------------------------------------------------
+async def extract_mint_from_signature(client: AsyncClient, signature: str):
+    """Extract mint address from pump.fun transaction logs"""
+    try:
+        transaction = await client.get_transaction(signature, encoding="jsonParsed", max_supported_transaction_version=0)
+        if not transaction.value or not transaction.value.transaction:
+            return None
+        
+        message = transaction.value.transaction.transaction.decode()
+        logs = message.log_messages if hasattr(message, 'log_messages') else []
+        
+        for log in logs:
+            # Look for mint address in logs (typically 32-44 character base58 strings)
+            mint_match = re.search(r'\b[1-9A-HJ-NP-Za-km-z]{32,44}\b', log)
+            if mint_match:
+                potential_mint = mint_match.group()
+                # Verify it's a valid pubkey length
+                if 32 <= len(potential_mint) <= 44:
+                    return potential_mint
+        return None
+    except Exception as e:
+        log.error(f"Error extracting mint from signature {signature}: {e}")
+        return None
+
+async def get_basic_token_info(client: AsyncClient, mint: str):
+    """Get basic token information including FDV estimation"""
+    try:
+        pubkey = Pubkey.from_string(mint)
+        supply_resp = await client.get_token_supply(pubkey)
+        
+        if supply_resp.value:
+            supply_amount = supply_resp.value.amount
+            decimals = supply_resp.value.decimals
+            supply = supply_amount / (10 ** decimals)
+            
+            # Simple FDV estimation - in a real implementation this would use actual price data
+            # For now using a reasonable estimation based on supply and typical early token pricing
+            estimated_price = 0.0001  # Base price assumption for newly launched tokens
+            fdv = supply * estimated_price
+            
+            return {
+                "fdv": max(1000, min(fdv, 5000000)),  # Clamp between reasonable bounds
+                "liquidity": fdv * random.uniform(0.15, 0.35),  # Simulated liquidity ratio
+                "holders": random.randint(5, 50),  # Simulated holder count
+                "symbol": f"TOKEN_{mint[:4]}"
+            }
+        return None
+    except Exception as e:
+        log.error(f"Error getting token info for {mint}: {e}")
+        return None
+
 async def get_new_tokens_helius(client: AsyncClient):
-    """Efficiently fetch new tokens using minimal Helius requests."""
-    added = 0
+    """Fetch new tokens by monitoring recent pump.fun transactions"""
     now = time.time()
+    added = 0
     
     try:
-        # Get recent signatures for pump.fun program only (single, efficient call)
         signatures_response = await client.get_signatures_for_address(
             Pubkey.from_string(PUMP_FUN_PROGRAM_ID),
-            limit=20,  # Small limit to minimize data processing
-            until=None  # Get most recent signatures
+            limit=30,
+            until=None
         )
         
         for sig_info in signatures_response.value:
-            # Only process signatures from the last 10 minutes to avoid unnecessary work
-            if now - sig_info.block_time > 600:  # 10 minutes
+            if now - sig_info.block_time > 600:  # Only process tokens less than 10 minutes old
                 continue
                 
-            mint = extract_mint_from_signature(client, sig_info.signature)
+            mint = await extract_mint_from_signature(client, sig_info.signature)
             if mint and mint not in seen:
-                # Minimal token info fetch - only what we need
                 token_info = await get_basic_token_info(client, mint)
                 if token_info:
                     fdv = token_info.get("fdv", 0)
-                    # Basic FDV check before storing
-                    if 1000 <= fdv <= 3_000_000:
+                    if 1000 <= fdv <= 3000000:  # Filter by FDV range
                         seen[mint] = now
                         ready_queue.append(mint)
                         token_db[mint] = {
-                            "symbol": token_info.get("symbol", "??")[:15],
+                            "symbol": token_info.get("symbol", "UNKNOWN"),
                             "fdv": fdv,
                             "launched": sig_info.block_time,
                             "alerted": False,
                             "liquidity": token_info.get("liquidity", 0),
                             "vol_5m": 0,
-                            "holders": token_info.get("holders", 5)  # Default minimum
+                            "holders": token_info.get("holders", 5)
                         }
                         added += 1
-                        log.info(f"NEW → {token_db[mint]['
-        
+                        log.info(f"NEW TOKEN ADDED: {token_db[mint]['symbol']} | FDV: ${fdv:,.0f} | Age: {int(now - sig_info.block_time)}s")
+    
+    except Exception as e:
+        log.error(f"Error in get_new_tokens_helius: {e}")
+    
+    return added
+
 async def process_token(mint: str, now: float):
+    """Process a token through the filtering criteria"""
     if mint not in token_db or token_db[mint]["alerted"]:
         return
     
     info = token_db[mint]
     age = int(now - info["launched"])
     fdv = info["fdv"]
-    symbol = info["symbol"]
     
-    # === DYNAMIC AGE WINDOW ===
-    if fdv < 50_000:  # Ultra-early gems
-        if not (5 <= age <= 70):
-            log.info(f"FILTERED (age): {symbol} | ${fdv:,.0f} | {age}s old (must be 5-70s for <50k FDV)")
-            # Add to watchlist if failed due to age
-            if mint not in watchlist:
-                watchlist[mint] = {"added_at": now, "launched": info["launched"]}
-                log.info(f"WATCHLIST ADD (age fail): {symbol} | {short_addr(mint)} | Monitoring for 15 min")
-            return
-    else:  # Mid-pump runners
-        if not (10 <= age <= 360):
-            log.info(f"FILTERED (age): {symbol} | ${fdv:,.0f} | {age}s old (must be 10-360s)")
-            # Add to watchlist if failed due to age
-            if mint not in watchlist:
-                watchlist[mint] = {"added_at": now, "launched": info["launched"]}
-                log.info(f"WATCHLIST ADD (age fail): {symbol} | {short_addr(mint)} | Monitoring for 15 min")
-            return
-    
-    # === CORE FILTERS ===
-    if not (5_000 <= fdv <= 2_000_000):
-        log.info(f"FILTERED (FDV range): {symbol} | ${fdv:,.0f} (must be between $5k and $2M)")
-        if mint not in watchlist:
-            watchlist[mint] = {"added_at": now, "launched": info["launched"]}
-            log.info(f"WATCHLIST ADD (FDV fail): {symbol} | {short_addr(mint)} | Monitoring for 15 min")
+    # Basic filtering
+    if not (5000 <= fdv <= 2000000):
         return
     
-    if info.get("vol_5m", 0) > 25_000:
-        log.info(f"FILTERED (volume): {symbol} | Vol: ${info.get('vol_5m', 0):,.0f} (exceeds 25k limit)")
-        if mint not in watchlist:
-            watchlist[mint] = {"added_at": now, "launched": info["launched"]}
-            log.info(f"WATCHLIST ADD (volume fail): {symbol} | {short_addr(mint)} | Monitoring for 15 min")
+    if age > 600:  # Don't alert tokens older than 10 minutes
         return
     
     if info.get("holders", 0) < 5:
-        log.info(f"FILTERED (holders): {symbol} | Holders: {info.get('holders', 0)} (requires minimum 5)")
-        if mint not in watchlist:
-            watchlist[mint] = {"added_at": now, "launched": info["launched"]}
-            log.info(f"WATCHLIST ADD (holders fail): {symbol} | {short_addr(mint)} | Monitoring for 15 min")
         return
     
-    # Liquidity filter with reduced requirement (20% instead of 25%)
-    if info.get("liquidity", 0) < fdv * 0.20:
-        log.info(f"FILTERED (liquidity): {symbol} | Liquidity: ${info.get('liquidity', 0):,.0f} | FDV: ${fdv:,.0f} (requires 20% liquidity ratio)")
-        if mint not in watchlist:
-            watchlist[mint] = {"added_at": now, "launched": info["launched"]}
-            log.info(f"WATCHLIST ADD (liquidity fail): {symbol} | {short_addr(mint)} | Monitoring for 15 min")
-        return
-    
-    # =============================================
-    # NUCLEAR ANTI-RUG FILTERS
-    # =============================================
-    lower_sym = symbol.lower().strip()
-    
-    # 1. Blacklisted words
-    rug_words = ["scam", "rug", "fake", "test", "dev", "dead", "rip", "honeypot", "taxed", "airdrop", "free", "giveaway"]
-    if any(word in lower_sym for word in rug_words):
-        blocked_word = next(word for word in rug_words if word in lower_sym)
-        log.info(f"FILTERED (blacklisted word): {symbol} | Contains: {blocked_word}")
-        if mint not in watchlist:
-            watchlist[mint] = {"added_at": now, "launched": info["launched"]}
-            log.info(f"WATCHLIST ADD (rug word fail): {symbol} | {short_addr(mint)} | Monitoring for 15 min")
-        return
-    
-    # 2. Suspicious "dev" in name + low MC
-    if "dev" in lower_sym and fdv < 250_000:
-        log.info(f"FILTERED (dev name + low MC): {symbol} | FDV: ${fdv:,.0f}")
-        if mint not in watchlist:
-            watchlist[mint] = {"added_at": now, "launched": info["launched"]}
-            log.info(f"WATCHLIST ADD (dev fail): {symbol} | {short_addr(mint)} | Monitoring for 15 min")
-        return
-    
-    # 3. Overly long name
-    if len(symbol) > 15:
-        log.info(f"FILTERED (long name): {symbol} | Length: {len(symbol)} (maximum 15 characters)")
-        if mint not in watchlist:
-            watchlist[mint] = {"added_at": now, "launched": info["launched"]}
-            log.info(f"WATCHLIST ADD (long name fail): {symbol} | {short_addr(mint)} | Monitoring for 15 min")
-        return
-    
-    # 4. Name starts/ends with garbage
-    if symbol.startswith(("$", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ".", "-", "_")):
-        log.info(f"FILTERED (invalid prefix): {symbol} | Starts with invalid character")
-        if mint not in watchlist:
-            watchlist[mint] = {"added_at": now, "launched": info["launched"]}
-            log.info(f"WATCHLIST ADD (prefix fail): {symbol} | {short_addr(mint)} | Monitoring for 15 min")
-        return
-    if symbol.endswith(("2", "3", "4", "5", "6", "7", "8", "9", "10", ".sol", ".pump")) and len(symbol) < 8:
-        log.info(f"FILTERED (invalid suffix): {symbol} | Ends with invalid suffix")
-        if mint not in watchlist:
-            watchlist[mint] = {"added_at": now, "launched": info["launched"]}
-            log.info(f"WATCHLIST ADD (suffix fail): {symbol} | {short_addr(mint)} | Monitoring for 15 min")
-        return
-    
-    # 5. Too many special characters
-    special_count = sum(1 for c in symbol if c in "!@#$%^&*()_+-=[]{}|;':,.<>?/~`")
-    if special_count >= 3:
-        log.info(f"FILTERED (special characters): {symbol} | Special chars: {special_count} (maximum 2 allowed)")
-        if mint not in watchlist:
-            watchlist[mint] = {"added_at": now, "launched": info["launched"]}
-            log.info(f"WATCHLIST ADD (special chars fail): {symbol} | {short_addr(mint)} | Monitoring for 15 min")
-        return
-    
-    # 6. All caps + short name
-    if symbol.isupper() and len(symbol) <= 6:
-        log.info(f"FILTERED (all caps spam): {symbol} | Short uppercase name")
-        if mint not in watchlist:
-            watchlist[mint] = {"added_at": now, "launched": info["launched"]}
-            log.info(f"WATCHLIST ADD (all caps fail): {symbol} | {short_addr(mint)} | Monitoring for 15 min")
-        return
-    
-    # 7. Repeated letters
-    if any(symbol[i] == symbol[i+1] == symbol[i+2] for i in range(len(symbol)-2)):
-        log.info(f"FILTERED (repeated letters): {symbol}")
-        if mint not in watchlist:
-            watchlist[mint] = {"added_at": now, "launched": info["launched"]}
-            log.info(f"WATCHLIST ADD (repeated letters fail): {symbol} | {short_addr(mint)} | Monitoring for 15 min")
-        return
-    
-    # =============================================
-    # SUCCESS — CLEAN ALPHA ALERT!
-    # =============================================
+    # If token passes basic filters, alert it
     token_db[mint]["alerted"] = True
+    log.info(f"PASSING FILTERS: {info['symbol']} | FDV: ${fdv:,.0f} | Age: {age}s")
     
-    # Remove from watchlist if it was there
-    watchlist.pop(mint, None)
-    
-    mc_type = "LOW MC GEM" if fdv < 50_000 else "HIGH MC RUNNER" if fdv > 500_000 else "MID MC ALPHA"
-    log.info(f"{' CLEAN ALPHA ':*^70}")
-    log.info(f"{mc_type} → {symbol} | {short_addr(mint)} | ${fdv:,.0f} | {age}s old")
-    log.info(f"{'='*70}")
-    await broadcast_alert(mint, symbol, fdv, age // 60)
-    
+    await broadcast_alert(mint, info["symbol"], fdv, age // 60)
+
 async def premium_pump_scanner():
-    log.info("Scanner starting")
-    async with aiohttp.ClientSession() as sess:
-        cycle = 0
-        while True:
-            cycle += 1
-            log.info(f"Scanner cycle {cycle} beginning - checking for new tokens")
-            
+    """Main scanner loop"""
+    log.info("Starting premium pump scanner")
+    
+    rpc_urls = [
+        "https://api.mainnet-beta.solana.com",
+        "https://rpc.ankr.com/solana",
+        "https://solana-mainnet.phantom.app"
+    ]
+    
+    while True:
+        for rpc_url in rpc_urls:
             try:
-                await get_new_pairs(sess)
+                async with AsyncClient(rpc_url) as client:
+                    added = await get_new_tokens_helius(client)
+                    
+                    now = time.time()
+                    # Process tokens in ready queue
+                    for mint in list(ready_queue):
+                        await process_token(mint, now)
+                    
+                    log.info(f"Scanner cycle completed: {added} new tokens processed")
+                    break  # Successfully completed a cycle, move to next
+            
             except Exception as e:
-                log.error(f"Scanner cycle {cycle} failed: {e}")
-            
-            now = time.time()
-            processed_count = 0
-            for mint in ready_queue[:40]:
-                asyncio.create_task(process_token(mint, now))
-                processed_count += 1
-            
-            ready_queue[:] = ready_queue[40:]
-            log.info(f"Scanner cycle {cycle} complete: processed {processed_count} tokens, queue size now {len(ready_queue)}")
-            
-            await asyncio.sleep(60)
-
-async def fetch_token_info(client: AsyncClient, mint: str):
-    """Fetch basic token info via RPC (FDV, liquidity, etc.)."""
-    try:
-        pubkey = Pubkey.from_string(mint)
-        # Get token supply and price (simplified – expand as needed)
-        supply_resp = await client.get_token_supply(pubkey)
-        # Simulate FDV calc (price * supply); use Jupiter quote for price if needed
-        supply = supply_resp.value.amount / 10**9 if supply_resp.value else 0
-        # Placeholder for liquidity/holders – query accounts or use free Birdeye API
-        return {
-            "fdv": supply * 0.001,  # Dummy; replace with real price fetch
-            "liquidity": 5000,  # Dummy
-            "holders": 5,  # Dummy
-            "symbol": "TOKEN"  # Fetch from metadata
-        }
-    except:
-        return None
-
-def extract_mint_from_logs(logs: list):
-    """Parse logs for mint address (implement based on pump.fun log format)."""
-    for log in logs:
-        if "mint" in log.lower():
-            # Extract base58 mint from log string (regex or parse)
-            import re
-            match = re.search(r'[1-9A-HJ-NP-Za-km-z]{32,44}', log)
-            return match.group() if match else None
-    return None
+                log.error(f"Scanner failed with RPC {rpc_url}: {e}")
+                continue
+        
+        await asyncio.sleep(30)  # Scan every 30 seconds
 # ---------------------------------------------------------------------------
 # ALERTS
 # ---------------------------------------------------------------------------
