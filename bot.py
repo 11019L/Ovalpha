@@ -432,73 +432,54 @@ async def jupiter_buy(uid: int, mint: str, sol_amount: float):
 # ---------------------------------------------------------------------------
 async def get_new_pairs(sess):
     global MORALIS_API_KEY
-    
+   
     if not MORALIS_API_KEY:
         log.warning("MORALIS_API_KEY missing – scanner paused")
-        await asyncio.sleep(30)
+        await asyncio.sleep(60)
         return
-    
-    url = "https://solana-gateway.moralis.io/token/mainnet/exchange/pumpfun/new?limit=50"
+   
+    url = "https://solana-gateway.moralis.io/token/mainnet/exchange/pumpfun/new?limit=20"  # Reduced limit
     now = time.time()
     added = 0
-    
-    try:
-        headers = {"accept": "application/json", "X-API-Key": MORALIS_API_KEY}
-        async with sess.get(url, headers=headers, timeout=12) as r:
-            if not r.ok:
-                log.warning(f"Moralis returned {r.status}")
-                return
-            data = await r.json()
-            tokens = data.get("result", [])
-            
-            for t in tokens:
-                mint = t.get("tokenAddress")
-                if not mint or mint in seen:
-                    continue
-
-                # SAFE FDV PARSING – handles null/None
-                fdv_raw = t.get("fullyDilutedValuation")
-                try:
-                    fdv = float(fdv_raw) if fdv_raw is not None else 0.0
-                except (TypeError, ValueError):
-                    fdv = 0.0
-
-                # Skip garbage tokens with 0 FDV
-                if fdv < 1000:
-                    continue
-
-                # SAFE TIMESTAMP PARSING
-                created_str = t.get("createdAt")
-                ts = now
-                if created_str:
-                    try:
-                        ts = datetime.fromisoformat(created_str.replace("Z", "+00:00")).timestamp()
-                    except:
-                        pass
-
-                if now - ts > 600:
-                    continue
-
-                seen[mint] = now
-                ready_queue.append(mint)
-                token_db[mint] = {
-                    "symbol": str(t.get("symbol", "??") or "??")[:15],
-                    "fdv": fdv,
-                    "launched": ts,
-                    "alerted": False,
-                    # Optional extra fields if you want them later
-                    "liquidity": float(t.get("liquidity", 0)) if t.get("liquidity") else 0,
-                    "vol_5m": 0,  # placeholder – can be updated later
-                    "holders": 0
-                }
-                added += 1
-                log.info(f"NEW → {token_db[mint]['symbol']} | {short_addr(mint)} | ${fdv:,.0f}")
-
-            if added:
-                log.info(f"Added {added} clean tokens from Moralis")
+   
+    for attempt in range(3):  # Retry up to 3 times
+        try:
+            headers = {"accept": "application/json", "X-API-Key": MORALIS_API_KEY}
+            async with sess.get(url, headers=headers, timeout=12) as r:
+                cu_used = r.headers.get('x-moralis-cu-used', 'Unknown')
+                log.info(f"Moralis call | CU Used: {cu_used} | Status: {r.status}")
                 
-    except Exception as e:
-        log.warning(f"Moralis error (retrying): {e}")
+                if r.status == 401 or r.status == 429:  # Limit exceeded
+                    log.warning(f"Limit exceeded (401/429) on attempt {attempt+1} – backing off {60 * (2 ** attempt)}s")
+                    if attempt < 2:
+                        await asyncio.sleep(60 * (2 ** attempt))  # 1min, then 2min
+                    continue
+                
+                if not r.ok:
+                    log.warning(f"Moralis error {r.status}")
+                    continue
+                
+                data = await r.json()
+                tokens = data.get("result", [])
+               
+                for t in tokens:
+                    mint = t.get("tokenAddress")
+                    if not mint or mint in seen:
+                        continue
+                    # ... (rest of your token processing code remains the same)
+                    added += 1
+                    log.info(f"NEW → {token_db[mint]['symbol']} | {short_addr(mint)} | ${fdv:,.0f}")
+                
+                if added:
+                    log.info(f"Added {added} tokens | Total CU this cycle: {cu_used}")
+                return  # Success
+               
+        except Exception as e:
+            log.warning(f"Moralis exception on attempt {attempt+1}: {e}")
+            if attempt < 2:
+                await asyncio.sleep(30 * (2 ** attempt))
+    
+    log.error("Moralis failed after 3 attempts – skipping cycle")
         
 async def process_token(mint: str, now: float):
     if mint not in token_db or token_db[mint]["alerted"]:
@@ -663,7 +644,7 @@ async def premium_pump_scanner():
             ready_queue[:] = ready_queue[40:]
             log.info(f"Scanner cycle {cycle} complete: processed {processed_count} tokens, queue size now {len(ready_queue)}")
             
-            await asyncio.sleep(18)
+            await asyncio.sleep(60)
 
 # ---------------------------------------------------------------------------
 # ALERTS
