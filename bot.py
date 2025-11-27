@@ -14,10 +14,13 @@ from datetime import datetime
 import logging
 logging.basicConfig(
     level=logging.INFO,
-    force=True,
-    format="%(asctime)s | %(levelname)s | %(message)s"
+    force=True,  # This forces the configuration to take effect regardless of previous configurations
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    handlers=[logging.StreamHandler()]  # Explicitly use stdout
 )
-log = logging.getLogger(__name__)
+logging.getLogger().info("LOGGING IS WORKING - This message should appear immediately after startup")
+
+log = logging.getLogger("onion")
 load_dotenv()
 
 import aiohttp
