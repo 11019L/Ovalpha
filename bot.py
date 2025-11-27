@@ -640,33 +640,13 @@ async def safe_edit(query, text, reply_markup=None):
 # MAIN
 # ---------------------------------------------------------------------------
 async def main():
+    log.info("main() function started")
+    
     global app
     
-    print("Creating Telegram application")
-    app = Application.builder().token(BOT_TOKEN)\
-        .concurrent_updates(True)\
-        .read_timeout(30)\
-        .write_timeout(30)\
-        .connect_timeout(30)\
-        .pool_timeout(60)\
-        .build()
+    log.info("Creating Application instance")
+    app = Application.builder().token(BOT_TOKEN).build()
+    log.info("Application instance created successfully")
     
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("menu", menu_cmd))
-    app.add_handler(CommandHandler("setbsc", setbsc))
-    app.add_handler(CallbackQueryHandler(button))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    
-    await app.initialize()
-    await app.start()
-    
-    log.info("Starting scanner task")
-    scanner_task = asyncio.create_task(premium_pump_scanner())
-    log.info("Scanner task started")
-    
-    asyncio.create_task(auto_save())
-    log.info("Auto-save task started")
-    
-    log.info("ONION X 2025 – LIVE AND READY")
-    await app.updater.start_polling()
-    await asyncio.Event().wait()
+    log.info("Adding handlers")
+    app.add
