@@ -58,6 +58,7 @@ BOT_USERNAME = os.getenv("BOT_USERNAME", "onionx_bot")
 USDT_BSC_WALLET = os.getenv("USDT_BSC_WALLET", "0x0000000000000000000000000000000000000000")
 FEE_WALLET = os.getenv("FEE_WALLET", "So11111111111111111111111111111111111111112")  # your fee wallet
 MORALIS_API_KEY = os.getenv("MORALIS_API_KEY", "")
+PUMP_FUN_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 
 # ---------------------------------------------------------------------------
 # 2025 FILTERS (REAL WORKING SETTINGS)
@@ -430,56 +431,45 @@ async def jupiter_buy(uid: int, mint: str, sol_amount: float):
 # ---------------------------------------------------------------------------
 # 2025 WORKING SCANNER (pump.fun API + backup)
 # ---------------------------------------------------------------------------
-async def get_new_pairs(sess):
-    global MORALIS_API_KEY
-   
-    if not MORALIS_API_KEY:
-        log.warning("MORALIS_API_KEY missing – scanner paused")
-        await asyncio.sleep(60)
-        return
-   
-    url = "https://solana-gateway.moralis.io/token/mainnet/exchange/pumpfun/new?limit=20"  # Reduced limit
-    now = time.time()
+async def get_new_tokens_helius(client: AsyncClient):
+    """Efficiently fetch new tokens using minimal Helius requests."""
     added = 0
-   
-    for attempt in range(3):  # Retry up to 3 times
-        try:
-            headers = {"accept": "application/json", "X-API-Key": MORALIS_API_KEY}
-            async with sess.get(url, headers=headers, timeout=12) as r:
-                cu_used = r.headers.get('x-moralis-cu-used', 'Unknown')
-                log.info(f"Moralis call | CU Used: {cu_used} | Status: {r.status}")
-                
-                if r.status == 401 or r.status == 429:  # Limit exceeded
-                    log.warning(f"Limit exceeded (401/429) on attempt {attempt+1} – backing off {60 * (2 ** attempt)}s")
-                    if attempt < 2:
-                        await asyncio.sleep(60 * (2 ** attempt))  # 1min, then 2min
-                    continue
-                
-                if not r.ok:
-                    log.warning(f"Moralis error {r.status}")
-                    continue
-                
-                data = await r.json()
-                tokens = data.get("result", [])
-               
-                for t in tokens:
-                    mint = t.get("tokenAddress")
-                    if not mint or mint in seen:
-                        continue
-                    # ... (rest of your token processing code remains the same)
-                    added += 1
-                    log.info(f"NEW → {token_db[mint]['symbol']} | {short_addr(mint)} | ${fdv:,.0f}")
-                
-                if added:
-                    log.info(f"Added {added} tokens | Total CU this cycle: {cu_used}")
-                return  # Success
-               
-        except Exception as e:
-            log.warning(f"Moralis exception on attempt {attempt+1}: {e}")
-            if attempt < 2:
-                await asyncio.sleep(30 * (2 ** attempt))
+    now = time.time()
     
-    log.error("Moralis failed after 3 attempts – skipping cycle")
+    try:
+        # Get recent signatures for pump.fun program only (single, efficient call)
+        signatures_response = await client.get_signatures_for_address(
+            Pubkey.from_string(PUMP_FUN_PROGRAM_ID),
+            limit=20,  # Small limit to minimize data processing
+            until=None  # Get most recent signatures
+        )
+        
+        for sig_info in signatures_response.value:
+            # Only process signatures from the last 10 minutes to avoid unnecessary work
+            if now - sig_info.block_time > 600:  # 10 minutes
+                continue
+                
+            mint = extract_mint_from_signature(client, sig_info.signature)
+            if mint and mint not in seen:
+                # Minimal token info fetch - only what we need
+                token_info = await get_basic_token_info(client, mint)
+                if token_info:
+                    fdv = token_info.get("fdv", 0)
+                    # Basic FDV check before storing
+                    if 1000 <= fdv <= 3_000_000:
+                        seen[mint] = now
+                        ready_queue.append(mint)
+                        token_db[mint] = {
+                            "symbol": token_info.get("symbol", "??")[:15],
+                            "fdv": fdv,
+                            "launched": sig_info.block_time,
+                            "alerted": False,
+                            "liquidity": token_info.get("liquidity", 0),
+                            "vol_5m": 0,
+                            "holders": token_info.get("holders", 5)  # Default minimum
+                        }
+                        added += 1
+                        log.info(f"NEW → {token_db[mint]['
         
 async def process_token(mint: str, now: float):
     if mint not in token_db or token_db[mint]["alerted"]:
@@ -646,6 +636,33 @@ async def premium_pump_scanner():
             
             await asyncio.sleep(60)
 
+async def fetch_token_info(client: AsyncClient, mint: str):
+    """Fetch basic token info via RPC (FDV, liquidity, etc.)."""
+    try:
+        pubkey = Pubkey.from_string(mint)
+        # Get token supply and price (simplified – expand as needed)
+        supply_resp = await client.get_token_supply(pubkey)
+        # Simulate FDV calc (price * supply); use Jupiter quote for price if needed
+        supply = supply_resp.value.amount / 10**9 if supply_resp.value else 0
+        # Placeholder for liquidity/holders – query accounts or use free Birdeye API
+        return {
+            "fdv": supply * 0.001,  # Dummy; replace with real price fetch
+            "liquidity": 5000,  # Dummy
+            "holders": 5,  # Dummy
+            "symbol": "TOKEN"  # Fetch from metadata
+        }
+    except:
+        return None
+
+def extract_mint_from_logs(logs: list):
+    """Parse logs for mint address (implement based on pump.fun log format)."""
+    for log in logs:
+        if "mint" in log.lower():
+            # Extract base58 mint from log string (regex or parse)
+            import re
+            match = re.search(r'[1-9A-HJ-NP-Za-km-z]{32,44}', log)
+            return match.group() if match else None
+    return None
 # ---------------------------------------------------------------------------
 # ALERTS
 # ---------------------------------------------------------------------------
