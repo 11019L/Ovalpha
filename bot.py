@@ -547,16 +547,27 @@ async def process_token(mint: str, now: float):
     await broadcast_alert(mint, symbol, fdv, age // 60)
     
 async def premium_pump_scanner():
+    log.info("Scanner starting")
     async with aiohttp.ClientSession() as sess:
         cycle = 0
         while True:
             cycle += 1
-            log.info(f"ONION X ALIVE → Cycle {cycle} | Queue: {len(ready_queue)} | Seen: {len(seen)}")
-            await get_new_pairs(sess)
+            log.info(f"Scanner cycle {cycle} beginning - checking for new tokens")
+            
+            try:
+                await get_new_pairs(sess)
+            except Exception as e:
+                log.error(f"Scanner cycle {cycle} failed: {e}")
+            
             now = time.time()
+            processed_count = 0
             for mint in ready_queue[:40]:
                 asyncio.create_task(process_token(mint, now))
+                processed_count += 1
+            
             ready_queue[:] = ready_queue[40:]
+            log.info(f"Scanner cycle {cycle} complete: processed {processed_count} tokens, queue size now {len(ready_queue)}")
+            
             await asyncio.sleep(18)
 
 # ---------------------------------------------------------------------------
@@ -629,40 +640,33 @@ async def safe_edit(query, text, reply_markup=None):
 # MAIN
 # ---------------------------------------------------------------------------
 async def main():
-    print("=== Starting main function ===")
-    
     global app
     
-    print("Creating Telegram application...")
-    app = Application.builder().token(BOT_TOKEN).build()
-    print("Telegram application created successfully")
+    print("Creating Telegram application")
+    app = Application.builder().token(BOT_TOKEN)\
+        .concurrent_updates(True)\
+        .read_timeout(30)\
+        .write_timeout(30)\
+        .connect_timeout(30)\
+        .pool_timeout(60)\
+        .build()
     
-    print("Adding command handlers...")
     app.add_handler(CommandHandler("start", start))
-    print("Command handlers added successfully")
+    app.add_handler(CommandHandler("menu", menu_cmd))
+    app.add_handler(CommandHandler("setbsc", setbsc))
+    app.add_handler(CallbackQueryHandler(button))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     
-    print("Initializing application...")
     await app.initialize()
-    print("Application initialized successfully")
-    
-    print("Starting application...")
     await app.start()
-    print("Application started successfully")
     
-    print("Bot is now ready to receive messages")
+    log.info("Starting scanner task")
+    scanner_task = asyncio.create_task(premium_pump_scanner())
+    log.info("Scanner task started")
     
-    print("Starting message polling...")
+    asyncio.create_task(auto_save())
+    log.info("Auto-save task started")
+    
+    log.info("ONION X 2025 – LIVE AND READY")
     await app.updater.start_polling()
-    print("Message polling started successfully")
-    
-    print("Bot is running and waiting for events")
     await asyncio.Event().wait()
-
-if __name__ == "__main__":
-    print("Bot startup beginning")
-    try:
-        asyncio.run(main())
-    except Exception as e:
-        print(f"Fatal error during startup: {e}")
-        import traceback
-        traceback.print_exc()
