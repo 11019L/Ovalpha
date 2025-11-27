@@ -164,40 +164,8 @@ def build_connect_url(uid: int) -> str:
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     chat_id = update.effective_chat.id
-
-    # Phantom verify
-    if ctx.args and ctx.args[0].startswith("verify_"):
-        try:
-            raw = " ".join(ctx.args)
-            query_str = raw.split("?", 1)[1] if "?" in raw else ""
-            params = urllib.parse.parse_qs(query_str)
-            _, str_uid, sig_hash = ctx.args[0].split("_", 2)
-            if int(str_uid) != uid:
-                await update.message.reply_text("Invalid user.")
-                return
-            challenge = users[uid].get("connect_challenge")
-            if not challenge or time.time() > users[uid].get("connect_expiry", 0):
-                await update.message.reply_text("Link expired.")
-                return
-            if sig_hash != hashlib.sha256(challenge.encode()).hexdigest()[:16]:
-                await update.message.reply_text("Invalid signature.")
-                return
-            pubkey = params.get("phantom_public_key", [None])[0]
-            if not pubkey or len(pubkey) != 44:
-                await update.message.reply_text("Wallet not found.")
-                return
-            users[uid]["wallet"] = pubkey
-            await update.message.reply_text(
-                f"<b>Wallet Connected!</b>\n<code>{short_addr(pubkey)}</code>",
-                parse_mode=ParseMode.HTML
-            )
-            await build_menu(uid)
-            return
-        except Exception as e:
-            log.error(f"Verify error: {e}")
-            await update.message.reply_text("Connection failed.")
-
-    # Normal start
+    
+    # Ensure user exists
     if uid not in users:
         users[uid] = {
             "free_alerts": 3, "paid": False, "chat_id": chat_id,
@@ -205,10 +173,76 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "default_buy_sol": 0.1, "default_tp": 2.8, "default_sl": 0.38,
             "trades": []
         }
-        global admin_id
-        if not admin_id:
-            admin_id = uid
+    
     users[uid]["chat_id"] = chat_id
+    
+    # Check if this is a wallet verification callback
+    if ctx.args and len(ctx.args) >= 1 and ctx.args[0].startswith("verify_"):
+        try:
+            verify_arg = ctx.args[0]
+            parts = verify_arg.split("_", 2)
+            if len(parts) < 3:
+                await update.message.reply_text("Invalid verification link.")
+                return
+                
+            expected_uid, sig_hash = parts[1], parts[2]
+            
+            if int(expected_uid) != uid:
+                await update.message.reply_text("This verification link is not for your account.")
+                return
+            
+            # Check if user has an active connection challenge
+            challenge = users[uid].get("connect_challenge")
+            challenge_expiry = users[uid].get("connect_expiry", 0)
+            
+            if not challenge or time.time() > challenge_expiry:
+                await update.message.reply_text("This connection link has expired. Please try connecting your wallet again.")
+                return
+            
+            # Verify the signature hash matches the challenge
+            expected_sig_hash = hashlib.sha256(challenge.encode()).hexdigest()[:16]
+            if sig_hash != expected_sig_hash:
+                await update.message.reply_text("Invalid verification signature.")
+                return
+            
+            # Extract wallet address from the full start command arguments
+            full_command = " ".join(ctx.args)
+            wallet_address = None
+            
+            # Look for phantom_public_key in the arguments
+            if "phantom_public_key=" in full_command:
+                # Extract the base58 encoded public key
+                public_key_start = full_command.find("phantom_public_key=") + 17
+                public_key_end = full_command.find("&", public_key_start)
+                if public_key_end == -1:
+                    public_key_end = full_command.find(" ", public_key_start)
+                if public_key_end != -1:
+                    wallet_address = full_command[public_key_start:public_key_end]
+            
+            if not wallet_address:
+                await update.message.reply_text("Could not detect wallet address from connection attempt. Please try connecting again.")
+                return
+            
+            # Successfully connect the wallet
+            users[uid]["wallet"] = wallet_address
+            users[uid].pop("connect_challenge", None)
+            users[uid].pop("connect_expiry", None)
+            
+            await update.message.reply_text(
+                f"✅ Wallet Connected Successfully!\n\n"
+                f"Wallet Address: <code>{short_addr(wallet_address)}</code>\n\n"
+                f"Your wallet is now connected to the bot.",
+                parse_mode=ParseMode.HTML
+            )
+            await build_menu(uid)
+            return
+            
+        except Exception as e:
+            log.error(f"Wallet verification error: {e}")
+            await update.message.reply_text("There was an error verifying the wallet connection. Please try connecting again.")
+            return
+    
+    # Normal start command (not a verification)
     await send_welcome(uid)
 
 async def menu_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
