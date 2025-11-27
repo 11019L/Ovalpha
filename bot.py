@@ -14,13 +14,11 @@ from datetime import datetime
 import logging
 logging.basicConfig(
     level=logging.INFO,
-    force=True,  # This forces the configuration to take effect regardless of previous configurations
     format="%(asctime)s | %(levelname)s | %(message)s",
-    handlers=[logging.StreamHandler()]  # Explicitly use stdout
+    handlers=[logging.StreamHandler()]
 )
-logging.getLogger().info("LOGGING IS WORKING - This message should appear immediately after startup")
 
-log = logging.getLogger("onion")
+logger = logging.getLogger("onion")
 def validate_environment():
     required_vars = ["BOT_TOKEN"]
     missing_vars = []
