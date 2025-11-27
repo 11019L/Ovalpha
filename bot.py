@@ -71,7 +71,7 @@ MORALIS_API_KEY = os.getenv("MORALIS_API_KEY", "")
 
 MIN_FDVS_SNIPE   = 5_000
 MAX_FDVS_SNIPE   = 3_000_000     # ← now catches $2.9M mid-pump runners
-LIQ_FDV_RATIO    = 0.25
+LIQ_FDV_RATIO    = 0.20
 MAX_VOL_SNIPE    = 40_000        # ← allow slightly higher volume for late entries
 MIN_HOLDERS      = 10
 MAX_AGE_SECONDS  = 600
