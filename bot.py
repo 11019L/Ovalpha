@@ -626,7 +626,11 @@ async def safe_edit(query, text, reply_markup=None):
 # MAIN
 # ---------------------------------------------------------------------------
 async def main():
+    log.info("Starting main function")
+    
     global app
+    log.info("Creating Application instance")
+    
     app = Application.builder().token(BOT_TOKEN)\
         .concurrent_updates(True)\
         .read_timeout(30)\
@@ -634,18 +638,35 @@ async def main():
         .connect_timeout(30)\
         .pool_timeout(60)\
         .build()
-
+    
+    log.info("Application instance created successfully")
+    
+    log.info("Adding handlers to application")
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu_cmd))
     app.add_handler(CommandHandler("setbsc", setbsc))
     app.add_handler(CallbackQueryHandler(button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-
+    
+    log.info("All handlers added, initializing application")
     await app.initialize()
+    log.info("Application initialized successfully")
+    
+    log.info("Starting application")
     await app.start()
+    log.info("Application started successfully")
+    
+    log.info("Starting background tasks")
     asyncio.create_task(premium_pump_scanner())
     asyncio.create_task(auto_save())
     asyncio.create_task(check_auto_sell())
-    log.info("ONION X 2025 – LIVE AND UNSTOPPABLE")
+    log.info("All background tasks started")
+    
+    log.info("ONION X 2025 – LIVE AND READY")
+    
+    log.info("Starting message polling")
     await app.updater.start_polling()
+    log.info("Message polling started successfully")
+    
+    log.info("Bot is now running and waiting for events")
     await asyncio.Event().wait()
