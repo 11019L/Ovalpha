@@ -644,4 +644,35 @@ async def main():
     
     global app
     
-    print("Step
+    print("Step 2: Creating Application instance")
+    app = Application.builder().token(BOT_TOKEN).build()
+    print("Step 3: Application instance created successfully")
+    
+    print("Step 4: Adding handlers")
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("menu", menu_cmd))
+    app.add_handler(CommandHandler("setbsc", setbsc))
+    app.add_handler(CallbackQueryHandler(button))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    print("Step 5: All handlers added successfully")
+    
+    print("Step 6: Initializing application")
+    await app.initialize()
+    print("Step 7: Application initialized successfully")
+    
+    print("Step 8: Starting application")
+    await app.start()
+    print("Step 9: Application started successfully")
+    
+    print("Step 10: Starting background tasks")
+    asyncio.create_task(premium_pump_scanner())
+    asyncio.create_task(auto_save())
+    asyncio.create_task(check_auto_sell())
+    print("Step 11: All background tasks started")
+    
+    print("Step 12: Starting message polling")
+    await app.updater.start_polling()
+    print("Step 13: Message polling started successfully")
+    
+    print("Bot is now running")
+    await asyncio.Event().wait()
