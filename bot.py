@@ -500,74 +500,86 @@ async def get_new_pairs(sess):
 async def process_token(mint: str, now: float):
     if mint not in token_db or token_db[mint]["alerted"]:
         return
+    
     info = token_db[mint]
     age = int(now - info["launched"])
     fdv = info["fdv"]
     symbol = info["symbol"]
-
-    # === DYNAMIC AGE WINDOW (low MC = fast, high MC = momentum) ===
-    if fdv < 50_000:        # Ultra-early gems
+    
+    # === DYNAMIC AGE WINDOW ===
+    if fdv < 50_000:  # Ultra-early gems
         if not (5 <= age <= 70):
+            log.info(f"FILTERED (age): {symbol} | ${fdv:,.0f} | {age}s old (must be 5-70s for <50k FDV)")
             return
-    else:                   # Mid-pump runners
+    else:  # Mid-pump runners
         if not (10 <= age <= 360):
+            log.info(f"FILTERED (age): {symbol} | ${fdv:,.0f} | {age}s old (must be 10-360s)")
             return
-
-    # === CORE FILTERS (ALPHA ONLY) ===
+    
+    # === CORE FILTERS ===
     if not (5_000 <= fdv <= 2_000_000):
+        log.info(f"FILTERED (FDV range): {symbol} | ${fdv:,.0f} (must be between $5k and $2M)")
         return
+    
     if info.get("vol_5m", 0) > 25_000:
+        log.info(f"FILTERED (volume): {symbol} | Vol: ${info.get('vol_5m', 0):,.0f} (exceeds 25k limit)")
         return
+    
     if info.get("holders", 0) < 5:
+        log.info(f"FILTERED (holders): {symbol} | Holders: {info.get('holders', 0)} (requires minimum 5)")
         return
-    if info.get("liquidity", 0) < fdv * 0.25:
+    
+    # Liquidity filter with reduced requirement (20% instead of 25%)
+    if info.get("liquidity", 0) < fdv * 0.20:
+        log.info(f"FILTERED (liquidity): {symbol} | Liquidity: ${info.get('liquidity', 0):,.0f} | FDV: ${fdv:,.0f} (requires 20% liquidity ratio)")
         return
-
+    
     # =============================================
-    # NUCLEAR ANTI-RUG FILTER (2025 EDITION)
+    # NUCLEAR ANTI-RUG FILTERS
     # =============================================
     lower_sym = symbol.lower().strip()
-
-    # 1. Blacklisted words (instant rug)
+    
+    # 1. Blacklisted words
     rug_words = ["scam", "rug", "fake", "test", "dev", "dead", "rip", "honeypot", "taxed", "airdrop", "free", "giveaway"]
     if any(word in lower_sym for word in rug_words):
-        log.info(f"RUG BLOCKED (blacklist): {symbol} | {short_addr(mint)}")
+        blocked_word = next(word for word in rug_words if word in lower_sym)
+        log.info(f"FILTERED (blacklisted word): {symbol} | Contains: {blocked_word}")
         return
-
-    # 2. Suspicious "dev" in name + low MC = 99% scam
+    
+    # 2. Suspicious "dev" in name + low MC
     if "dev" in lower_sym and fdv < 250_000:
-        log.info(f"RUG BLOCKED (dev name + low MC): {symbol}")
+        log.info(f"FILTERED (dev name + low MC): {symbol} | FDV: ${fdv:,.0f}")
         return
-
-    # 3. Overly long or spammy name (>15 chars usually trash)
+    
+    # 3. Overly long name
     if len(symbol) > 15:
-        log.info(f"RUG BLOCKED (long name): {symbol}")
+        log.info(f"FILTERED (long name): {symbol} | Length: {len(symbol)} (maximum 15 characters)")
         return
-
-    # 4. Name starts/ends with garbage (common bot spam)
+    
+    # 4. Name starts/ends with garbage
     if symbol.startswith(("$", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ".", "-", "_")):
-        log.info(f"RUG BLOCKED (ugly prefix): {symbol}")
+        log.info(f"FILTERED (invalid prefix): {symbol} | Starts with invalid character")
         return
     if symbol.endswith(("2", "3", "4", "5", "6", "7", "8", "9", "10", ".sol", ".pump")) and len(symbol) < 8:
-        log.info(f"RUG BLOCKED (lazy suffix): {symbol}")
+        log.info(f"FILTERED (invalid suffix): {symbol} | Ends with invalid suffix")
         return
-
-    # 5. Too many special characters = spam
+    
+    # 5. Too many special characters
     special_count = sum(1 for c in symbol if c in "!@#$%^&*()_+-=[]{}|;':,.<>?/~`")
     if special_count >= 3:
-        log.info(f"RUG BLOCKED (too many special chars): {symbol}")
+        log.info(f"FILTERED (special characters): {symbol} | Special chars: {special_count} (maximum 2 allowed)")
         return
-
-    # 6. All caps + short = bot spam
+    
+    # 6. All caps + short name
     if symbol.isupper() and len(symbol) <= 6:
-        log.info(f"RUG BLOCKED (ALL CAPS spam): {symbol}")
+        log.info(f"FILTERED (all caps spam): {symbol} | Short uppercase name")
         return
-
-    # 7. Repeated letters (e.g. "PEPEPEPE", "GOOO", "XXXX") = trash
+    
+    # 7. Repeated letters
     if any(symbol[i] == symbol[i+1] == symbol[i+2] for i in range(len(symbol)-2)):
-        log.info(f"RUG BLOCKED (repeated letters): {symbol}")
+        log.info(f"FILTERED (repeated letters): {symbol}")
         return
-
+    
     # =============================================
     # SUCCESS — CLEAN ALPHA ALERT!
     # =============================================
@@ -576,7 +588,6 @@ async def process_token(mint: str, now: float):
     log.info(f"{' CLEAN ALPHA ':*^70}")
     log.info(f"{mc_type} → {symbol} | {short_addr(mint)} | ${fdv:,.0f} | {age}s old")
     log.info(f"{'='*70}")
-
     await broadcast_alert(mint, symbol, fdv, age // 60)
     
 async def premium_pump_scanner():
