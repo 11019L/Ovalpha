@@ -147,14 +147,13 @@ def short_addr(addr: str) -> str:
 # PHANTOM CONNECT
 # ---------------------------------------------------------------------------
 def build_connect_url(uid: int) -> str:
-    challenge = f"onionx-{uid}-{int(time.time())}"
-    sig_hash = hashlib.sha256(challenge.encode()).hexdigest()[:16]
-    users[uid]["connect_challenge"] = challenge
-    users[uid]["connect_expiry"] = time.time() + 300
+    """Build a simpler connect URL that doesn't rely on complex parameter parsing."""
+    users[uid]["connect_challenge"] = f"connect_{uid}"
+    users[uid]["connect_expiry"] = time.time() + 300  # 5 minutes
+    
     params = {
         "app_url": f"https://t.me/{BOT_USERNAME}",
-        "redirect_link": f"https://t.me/{BOT_USERNAME}?start=verify_{uid}_{sig_hash}",
-        "cluster": "mainnet-beta"
+        "redirect_link": f"https://t.me/{BOT_USERNAME}?start=connect_{uid}"
     }
     return f"https://phantom.app/ul/v1/connect?{urllib.parse.urlencode(params)}"
 
