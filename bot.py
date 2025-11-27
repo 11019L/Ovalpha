@@ -175,72 +175,59 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     
     users[uid]["chat_id"] = chat_id
     
-    # Check if this is a wallet verification callback
-    if ctx.args and len(ctx.args) >= 1 and ctx.args[0].startswith("verify_"):
-        try:
-            verify_arg = ctx.args[0]
-            parts = verify_arg.split("_", 2)
-            if len(parts) < 3:
-                await update.message.reply_text("Invalid verification link.")
-                return
-                
-            expected_uid, sig_hash = parts[1], parts[2]
-            
-            if int(expected_uid) != uid:
-                await update.message.reply_text("This verification link is not for your account.")
-                return
-            
-            # Check if user has an active connection challenge
-            challenge = users[uid].get("connect_challenge")
-            challenge_expiry = users[uid].get("connect_expiry", 0)
-            
-            if not challenge or time.time() > challenge_expiry:
-                await update.message.reply_text("This connection link has expired. Please try connecting your wallet again.")
-                return
-            
-            # Verify the signature hash matches the challenge
-            expected_sig_hash = hashlib.sha256(challenge.encode()).hexdigest()[:16]
-            if sig_hash != expected_sig_hash:
-                await update.message.reply_text("Invalid verification signature.")
-                return
-            
-            # Extract wallet address from the full start command arguments
-            full_command = " ".join(ctx.args)
-            wallet_address = None
-            
-            # Look for phantom_public_key in the arguments
-            if "phantom_public_key=" in full_command:
-                # Extract the base58 encoded public key
-                public_key_start = full_command.find("phantom_public_key=") + 17
-                public_key_end = full_command.find("&", public_key_start)
-                if public_key_end == -1:
-                    public_key_end = full_command.find(" ", public_key_start)
-                if public_key_end != -1:
-                    wallet_address = full_command[public_key_start:public_key_end]
-            
-            if not wallet_address:
-                await update.message.reply_text("Could not detect wallet address from connection attempt. Please try connecting again.")
-                return
-            
-            # Successfully connect the wallet
-            users[uid]["wallet"] = wallet_address
-            users[uid].pop("connect_challenge", None)
-            users[uid].pop("connect_expiry", None)
-            
-            await update.message.reply_text(
-                f"✅ Wallet Connected Successfully!\n\n"
-                f"Wallet Address: <code>{short_addr(wallet_address)}</code>\n\n"
-                f"Your wallet is now connected to the bot.",
-                parse_mode=ParseMode.HTML
-            )
-            await build_menu(uid)
-            return
-            
-        except Exception as e:
-            log.error(f"Wallet verification error: {e}")
-            await update.message.reply_text("There was an error verifying the wallet connection. Please try connecting again.")
-            return
+    # Check if this is a wallet connection attempt
+    if ctx.args and len(ctx.args) > 0 and ctx.args[0].startswith("connect_"):
+        await update.message.reply_text(
+            "Phantom wallet connection detected.\n\n"
+            "Please go back to the bot menu and click 'Connect Wallet' again. "
+            "After approving the connection in Phantom, you will be returned here, "
+            "and the wallet connection will be completed automatically."
+        )
+        return
     
+    # Normal start command
+    await send_welcome(uid)
+
+async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    
+    if uid not in users:
+        users[uid] = {
+            "free_alerts": 3, "paid": False, "chat_id": q.message.chat_id,
+            "wallet": None, "bsc_wallet": None,
+            "default_buy_sol": 0.1, "default_tp": 2.8, "default_sl": 0.38,
+            "trades": []
+        }
+    
+    data = q.data
+    
+    if data == "wallet" and users[uid].get("wallet"):
+        txt = f"<b>Connected Wallet</b>\n\n<code>{short_addr(users[uid]['wallet'])}</code>"
+        kb = [[InlineKeyboardButton("Disconnect", callback_data="disconnect_wallet"), 
+               InlineKeyboardButton("Back", callback_data="menu")]]
+        await safe_edit(q, txt, InlineKeyboardMarkup(kb))
+        return
+    
+    if data == "connect_wallet" or (data == "wallet" and not users[uid].get("wallet")):
+        # Simple approach: Send a message asking the user to manually connect via Phantom
+        connect_message = (
+            "To connect your Phantom wallet:\n\n"
+            "1. Open the Phantom wallet app\n"
+            "2. Tap the Settings icon (gear) in the top right\n"
+            "3. Select 'Connect with dApps'\n"
+            "4. Search for and select this bot (@{})\n"
+            "5. Approve the connection\n\n"
+            "Once connected, return here and click 'Wallet' to verify the connection."
+        ).format(BOT_USERNAME)
+        
+        kb = [[InlineKeyboardButton("Wallet Status", callback_data="wallet"), 
+               InlineKeyboardButton("Main Menu", callback_data="menu")]]
+        
+        await safe_edit(q, connect_message, InlineKeyboardMarkup(kb))
+        return 
+        
     # Normal start command (not a verification)
     await send_welcome(uid)
 
