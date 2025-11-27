@@ -83,6 +83,9 @@ RPC_POOL = [
     "https://solana-rpc.tokend.io"
 ]
 
+watchlist = {}  # mint → {"added_at": time.time(), "launched": ts, "info": info_dict}
+WATCH_DURATION = 900  # 15 minutes
+RECHECK_INTERVAL = 30  # how often we recheck the watchlist
 # ---------------------------------------------------------------------------
 # STATE
 # ---------------------------------------------------------------------------
@@ -510,28 +513,48 @@ async def process_token(mint: str, now: float):
     if fdv < 50_000:  # Ultra-early gems
         if not (5 <= age <= 70):
             log.info(f"FILTERED (age): {symbol} | ${fdv:,.0f} | {age}s old (must be 5-70s for <50k FDV)")
+            # Add to watchlist if failed due to age
+            if mint not in watchlist:
+                watchlist[mint] = {"added_at": now, "launched": info["launched"]}
+                log.info(f"WATCHLIST ADD (age fail): {symbol} | {short_addr(mint)} | Monitoring for 15 min")
             return
     else:  # Mid-pump runners
         if not (10 <= age <= 360):
             log.info(f"FILTERED (age): {symbol} | ${fdv:,.0f} | {age}s old (must be 10-360s)")
+            # Add to watchlist if failed due to age
+            if mint not in watchlist:
+                watchlist[mint] = {"added_at": now, "launched": info["launched"]}
+                log.info(f"WATCHLIST ADD (age fail): {symbol} | {short_addr(mint)} | Monitoring for 15 min")
             return
     
     # === CORE FILTERS ===
     if not (5_000 <= fdv <= 2_000_000):
         log.info(f"FILTERED (FDV range): {symbol} | ${fdv:,.0f} (must be between $5k and $2M)")
+        if mint not in watchlist:
+            watchlist[mint] = {"added_at": now, "launched": info["launched"]}
+            log.info(f"WATCHLIST ADD (FDV fail): {symbol} | {short_addr(mint)} | Monitoring for 15 min")
         return
     
     if info.get("vol_5m", 0) > 25_000:
         log.info(f"FILTERED (volume): {symbol} | Vol: ${info.get('vol_5m', 0):,.0f} (exceeds 25k limit)")
+        if mint not in watchlist:
+            watchlist[mint] = {"added_at": now, "launched": info["launched"]}
+            log.info(f"WATCHLIST ADD (volume fail): {symbol} | {short_addr(mint)} | Monitoring for 15 min")
         return
     
     if info.get("holders", 0) < 5:
         log.info(f"FILTERED (holders): {symbol} | Holders: {info.get('holders', 0)} (requires minimum 5)")
+        if mint not in watchlist:
+            watchlist[mint] = {"added_at": now, "launched": info["launched"]}
+            log.info(f"WATCHLIST ADD (holders fail): {symbol} | {short_addr(mint)} | Monitoring for 15 min")
         return
     
     # Liquidity filter with reduced requirement (20% instead of 25%)
     if info.get("liquidity", 0) < fdv * 0.20:
         log.info(f"FILTERED (liquidity): {symbol} | Liquidity: ${info.get('liquidity', 0):,.0f} | FDV: ${fdv:,.0f} (requires 20% liquidity ratio)")
+        if mint not in watchlist:
+            watchlist[mint] = {"added_at": now, "launched": info["launched"]}
+            log.info(f"WATCHLIST ADD (liquidity fail): {symbol} | {short_addr(mint)} | Monitoring for 15 min")
         return
     
     # =============================================
@@ -544,46 +567,74 @@ async def process_token(mint: str, now: float):
     if any(word in lower_sym for word in rug_words):
         blocked_word = next(word for word in rug_words if word in lower_sym)
         log.info(f"FILTERED (blacklisted word): {symbol} | Contains: {blocked_word}")
+        if mint not in watchlist:
+            watchlist[mint] = {"added_at": now, "launched": info["launched"]}
+            log.info(f"WATCHLIST ADD (rug word fail): {symbol} | {short_addr(mint)} | Monitoring for 15 min")
         return
     
     # 2. Suspicious "dev" in name + low MC
     if "dev" in lower_sym and fdv < 250_000:
         log.info(f"FILTERED (dev name + low MC): {symbol} | FDV: ${fdv:,.0f}")
+        if mint not in watchlist:
+            watchlist[mint] = {"added_at": now, "launched": info["launched"]}
+            log.info(f"WATCHLIST ADD (dev fail): {symbol} | {short_addr(mint)} | Monitoring for 15 min")
         return
     
     # 3. Overly long name
     if len(symbol) > 15:
         log.info(f"FILTERED (long name): {symbol} | Length: {len(symbol)} (maximum 15 characters)")
+        if mint not in watchlist:
+            watchlist[mint] = {"added_at": now, "launched": info["launched"]}
+            log.info(f"WATCHLIST ADD (long name fail): {symbol} | {short_addr(mint)} | Monitoring for 15 min")
         return
     
     # 4. Name starts/ends with garbage
     if symbol.startswith(("$", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ".", "-", "_")):
         log.info(f"FILTERED (invalid prefix): {symbol} | Starts with invalid character")
+        if mint not in watchlist:
+            watchlist[mint] = {"added_at": now, "launched": info["launched"]}
+            log.info(f"WATCHLIST ADD (prefix fail): {symbol} | {short_addr(mint)} | Monitoring for 15 min")
         return
     if symbol.endswith(("2", "3", "4", "5", "6", "7", "8", "9", "10", ".sol", ".pump")) and len(symbol) < 8:
         log.info(f"FILTERED (invalid suffix): {symbol} | Ends with invalid suffix")
+        if mint not in watchlist:
+            watchlist[mint] = {"added_at": now, "launched": info["launched"]}
+            log.info(f"WATCHLIST ADD (suffix fail): {symbol} | {short_addr(mint)} | Monitoring for 15 min")
         return
     
     # 5. Too many special characters
     special_count = sum(1 for c in symbol if c in "!@#$%^&*()_+-=[]{}|;':,.<>?/~`")
     if special_count >= 3:
         log.info(f"FILTERED (special characters): {symbol} | Special chars: {special_count} (maximum 2 allowed)")
+        if mint not in watchlist:
+            watchlist[mint] = {"added_at": now, "launched": info["launched"]}
+            log.info(f"WATCHLIST ADD (special chars fail): {symbol} | {short_addr(mint)} | Monitoring for 15 min")
         return
     
     # 6. All caps + short name
     if symbol.isupper() and len(symbol) <= 6:
         log.info(f"FILTERED (all caps spam): {symbol} | Short uppercase name")
+        if mint not in watchlist:
+            watchlist[mint] = {"added_at": now, "launched": info["launched"]}
+            log.info(f"WATCHLIST ADD (all caps fail): {symbol} | {short_addr(mint)} | Monitoring for 15 min")
         return
     
     # 7. Repeated letters
     if any(symbol[i] == symbol[i+1] == symbol[i+2] for i in range(len(symbol)-2)):
         log.info(f"FILTERED (repeated letters): {symbol}")
+        if mint not in watchlist:
+            watchlist[mint] = {"added_at": now, "launched": info["launched"]}
+            log.info(f"WATCHLIST ADD (repeated letters fail): {symbol} | {short_addr(mint)} | Monitoring for 15 min")
         return
     
     # =============================================
     # SUCCESS — CLEAN ALPHA ALERT!
     # =============================================
     token_db[mint]["alerted"] = True
+    
+    # Remove from watchlist if it was there
+    watchlist.pop(mint, None)
+    
     mc_type = "LOW MC GEM" if fdv < 50_000 else "HIGH MC RUNNER" if fdv > 500_000 else "MID MC ALPHA"
     log.info(f"{' CLEAN ALPHA ':*^70}")
     log.info(f"{mc_type} → {symbol} | {short_addr(mint)} | ${fdv:,.0f} | {age}s old")
@@ -683,6 +734,30 @@ async def safe_edit(query, text, reply_markup=None):
 # ---------------------------------------------------------------------------
 # MAIN
 # ---------------------------------------------------------------------------
+async def watchlist_monitor():
+    while True:
+        await asyncio.sleep(RECHECK_INTERVAL)
+        now = time.time()
+        to_remove = []
+
+        for mint, data in list(watchlist.items()):
+            launched = data["launched"]
+            age = int(now - launched)
+
+            # Drop if older than 15 min
+            if age > WATCH_DURATION:
+                log.info(f"WATCHLIST DROP (15min expired): {token_db.get(mint, {}).get('symbol', '??')} | {short_addr(mint)}")
+                to_remove.append(mint)
+                continue
+
+            # Re-use the same process_token logic
+            await process_token(mint, now)
+
+        # Clean up expired ones
+        for mint in to_remove:
+            watchlist.pop(mint, None)
+            token_db.pop(mint, None)  # optional cleanup
+            
 async def main():
     try:
         print("Starting Onion X Bot...")
@@ -710,6 +785,7 @@ async def main():
         asyncio.create_task(premium_pump_scanner())
         asyncio.create_task(auto_save())
         asyncio.create_task(check_auto_sell())
+        asyncio.create_task(watchlist_monitor())
         print("All background tasks started")
 
         # Start polling
