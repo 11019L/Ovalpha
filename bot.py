@@ -640,13 +640,8 @@ async def safe_edit(query, text, reply_markup=None):
 # MAIN
 # ---------------------------------------------------------------------------
 async def main():
-    log.info("main() function started")
+    print("Step 1: Starting main function")
     
     global app
     
-    log.info("Creating Application instance")
-    app = Application.builder().token(BOT_TOKEN).build()
-    log.info("Application instance created successfully")
-    
-    log.info("Adding handlers")
-    app.add
+    print("Step
