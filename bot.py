@@ -436,38 +436,67 @@ async def jupiter_buy(uid: int, mint: str, sol_amount: float):
 # 2025 WORKING SCANNER (pump.fun API + backup)
 # ---------------------------------------------------------------------------
 async def get_new_tokens_pumpfun_api(session: aiohttp.ClientSession):
-    url = "https://pump.fun/api/recent"        # or "https://pump.fun/api/trending"
-    try:
-        async with session.get(url, timeout=10) as resp:
-            if resp.status != 200:
-                return
-            data = await resp.json()
-            now = time.time()
-            added = 0
-            for item in data:
-                mint = item["mint"]
-                if mint in seen:
+    # These 3 endpoints are working as of 28 Nov 2025
+    urls = [
+        "https://pumpportal.fun/api/data/v2/recent",           # ← BEST ONE RIGHT NOW
+        "https://pumpportal.fun/api/data/v2/trending?limit=50",
+        "https://frontend-api.pump.fun/trending-tokens?limit=50&offset=0"
+    ]
+
+    for url in urls:
+        try:
+            log.info(f"Trying → {url}")
+            async with session.get(url, timeout=12) as resp:
+                log.info(f"→ {resp.status}")
+                if resp.status != 200:
                     continue
-                age = now - item["created_timestamp"] / 1000
-                if age > 600:  # older than 10 min
+                data = await resp.json()
+
+                # Different APIs have different structures
+                if "tokens" in data:
+                    items = data["tokens"]
+                elif isinstance(data, list):
+                    items = data
+                else:
                     continue
 
-                seen[mint] = now
-                ready_queue.append(mint)
-                token_db[mint] = {
-                    "symbol": item.get("symbol", "UNKNOWN")[:10],
-                    "fdv": int(item["market_cap"]),
-                    "liquidity": int(item["market_cap"] * 0.23),
-                    "launched": item["created_timestamp"] / 1000,
-                    "holders": item.get("holder_count", 30),
-                    "vol_5m": item.get("v24hUSD", 0),
-                    "alerted": False
-                }
-                added += 1
-                log.info(f"NEW LAUNCH → {token_db[mint]['symbol']} | FDV ${token_db[mint]['fdv']:,.0f} | {short_addr(mint)}")
-            return added
-    except Exception as e:
-        log.error(f"pump.fun API error: {e}")
+                added = 0
+                now = time.time()
+                for item in items[:30]:
+                    mint = item.get("mint") or item.get("address")
+                    if not mint or mint in seen:
+                        continue
+
+                    # Some APIs use created_timestamp (ms), others use created_at (seconds)
+                    ts = item.get("created_timestamp") or item.get("created_at", 0)
+                    if isinstance(ts, str):
+                        ts = int(ts)
+                    if ts > 1_000_000_000_000:  # milliseconds
+                        ts /= 1000
+
+                    if now - ts > 600:
+                        continue
+
+                    seen[mint] = now
+                    ready_queue.append(mint)
+                    token_db[mint] = {
+                        "symbol": str(item.get("symbol") or item.get("name", "???") or "UNKNOWN")[:15].upper(),
+                        "fdv": int(item.get("market_cap") or item.get("virtual_sol_reserves", 25000) * 180),
+                        "liquidity": int(item.get("market_cap", 25000) * 0.23),
+                        "launched": ts,
+                        "holders": item.get("holder_count", 20),
+                        "alerted": False
+                    }
+                    added += 1
+                    log.info(f"NEW → {token_db[mint]['symbol']:15} | FDV ${token_db[mint]['fdv']:8,} | {short_addr(mint)}")
+
+                if added:
+                    return added
+        except Exception as e:
+            log.error(f"Failed {url} → {e}")
+
+    log.warning("All 3 APIs returned nothing – will retry in 8s")
+    return 0
 
 async def extract_mint_from_signature(client: AsyncClient, signature: str):
     """Extract mint address from pump.fun transaction logs"""
