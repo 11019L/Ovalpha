@@ -48,9 +48,13 @@ from telegram.ext import (
     CallbackQueryHandler, MessageHandler, filters
 )
 from solders.pubkey import Pubkey
-from solana.rpc.async_api import AsyncClient
+from solders.signature import Signature
+from solders.transaction_status import (
+    TransactionConfirmationStatus,
+    UiTransactionEncoding,
+    EncodedTransactionWithStatusMeta,   # ← NEW correct type
+    TransactionStatusMeta,     
 from jupiter_python_sdk.jupiter import Jupiter
-from solders.transaction_status import EncodedConfirmedTransaction
 
 
 # ---------------------------------------------------------------------------
@@ -479,36 +483,38 @@ async def get_new_tokens_rpc(client: AsyncClient):
     return added
 
 async def extract_mint_from_signature(client: AsyncClient, sig: str) -> str | None:
-    """Extract mint from pump.fun create tx using 2025 solders structure"""
     try:
         resp = await client.get_transaction(
-            sig,
-            encoding="jsonParsed",
+            Signature.from_string(sig),
+            encoding=UiTransactionEncoding.JsonParsed,
             max_supported_transaction_version=0
         )
+
         tx = resp.value
-        if not tx or not tx.transaction:
+        if not tx:
             return None
 
-        meta = tx.transaction.meta
+        # 2025 way: tx is EncodedTransactionWithStatusMeta
+        transaction_with_meta: EncodedTransactionWithStatusMeta = tx
+        meta: TransactionStatusMeta = transaction_with_meta.transaction.meta
         if not meta:
             return None
 
-        # Find new token mint: post balance 1, pre 0
-        post_balances = meta.post_token_balances or []
         pre_balances = meta.pre_token_balances or []
+        post_balances = meta.post_token_balances or []
 
         pre_map = {b.account_index: b for b in pre_balances}
         for post in post_balances:
             pre = pre_map.get(post.account_index)
             if (post.ui_token_amount.ui_amount == 1.0 and
                 (not pre or pre.ui_token_amount.ui_amount == 0)):
-                mint = post.mint
-                if len(mint) == 44:  # valid base58 mint
+                mint = str(post.mint)
+                if len(mint) == 44:
                     return mint
         return None
+
     except Exception as e:
-        log.error(f"Mint extract failed for {sig}: {e}")
+        log.error(f"extract_mint failed for {sig}: {e}")
         return None
 
 async def get_basic_token_info(client: AsyncClient, mint: str):
