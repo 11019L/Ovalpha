@@ -53,7 +53,8 @@ from solders.transaction_status import (
     TransactionConfirmationStatus,
     UiTransactionEncoding,
     EncodedTransactionWithStatusMeta,   # ← NEW correct type
-    TransactionStatusMeta,     
+    TransactionStatusMeta,  
+)
 from jupiter_python_sdk.jupiter import Jupiter
 
 
