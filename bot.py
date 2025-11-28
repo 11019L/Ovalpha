@@ -8,6 +8,7 @@ import random
 import hashlib
 import urllib.parse
 import base64
+import aiohttp
 import re
 from pathlib import Path
 from dotenv import load_dotenv
@@ -434,53 +435,39 @@ async def jupiter_buy(uid: int, mint: str, sol_amount: float):
 # ---------------------------------------------------------------------------
 # 2025 WORKING SCANNER (pump.fun API + backup)
 # ---------------------------------------------------------------------------
-async def get_new_tokens_helius(client: AsyncClient):
-    """Fetch new tokens by monitoring recent pump.fun transactions"""
-    now = time.time()
-    added = 0
-   
+async def get_new_tokens_pumpfun_api(session: aiohttp.ClientSession):
+    url = "https://pump.fun/api/recent"        # or "https://pump.fun/api/trending"
     try:
-        # Only request a very small number of recent signatures to minimize transaction fetches
-        signatures_response = await client.get_signatures_for_address(
-            Pubkey.from_string(PUMP_FUN_PROGRAM_ID),
-            limit=5,  # Reduced to only 5 signatures per cycle
-            until=None
-        )
-       
-        processed_count = 0
-        for sig_info in signatures_response.value:
-            if now - sig_info.block_time > 600:  # Only process tokens less than 10 minutes old
-                continue
-            
-            processed_count += 1
-            if processed_count > 3:  # Only process up to 3 signatures per cycle
-                break
-            
-            # Add a longer delay between transaction fetches
-            await asyncio.sleep(0.5)  # 500ms delay between each transaction fetch
-               
-            mint = await extract_mint_from_signature(client, sig_info.signature)
-            if mint and mint not in seen:
-                # Skip detailed token info fetching for now to reduce requests
-                # Just add the mint to the queue with basic information
+        async with session.get(url, timeout=10) as resp:
+            if resp.status != 200:
+                return
+            data = await resp.json()
+            now = time.time()
+            added = 0
+            for item in data:
+                mint = item["mint"]
+                if mint in seen:
+                    continue
+                age = now - item["created_timestamp"] / 1000
+                if age > 600:  # older than 10 min
+                    continue
+
                 seen[mint] = now
                 ready_queue.append(mint)
                 token_db[mint] = {
-                    "symbol": f"TOKEN_{mint[:6].upper()}",
-                    "fdv": 50000,  # Default FDV value
-                    "launched": sig_info.block_time,
-                    "alerted": False,
-                    "liquidity": 10000,  # Default liquidity
-                    "vol_5m": 0,
-                    "holders": 10  # Default holder count
+                    "symbol": item.get("symbol", "UNKNOWN")[:10],
+                    "fdv": int(item["market_cap"]),
+                    "liquidity": int(item["market_cap"] * 0.23),
+                    "launched": item["created_timestamp"] / 1000,
+                    "holders": item.get("holder_count", 30),
+                    "vol_5m": item.get("v24hUSD", 0),
+                    "alerted": False
                 }
                 added += 1
-                log.info(f"NEW TOKEN DETECTED: {short_addr(mint)} | Age: {int(now - sig_info.block_time)}s")
-   
+                log.info(f"NEW LAUNCH → {token_db[mint]['symbol']} | FDV ${token_db[mint]['fdv']:,.0f} | {short_addr(mint)}")
+            return added
     except Exception as e:
-        log.error(f"Error in get_new_tokens_helius: {e}")
-   
-    return added
+        log.error(f"pump.fun API error: {e}")
 
 async def extract_mint_from_signature(client: AsyncClient, signature: str):
     """Extract mint address from pump.fun transaction logs"""
@@ -550,43 +537,17 @@ async def process_token(mint: str, now: float):
     await broadcast_alert(mint, info["symbol"], fdv, age // 60)
 
 async def premium_pump_scanner():
-    """Main scanner loop with aggressive rate limiting"""
-    log.info("Starting premium pump scanner")
-   
-    rpc_urls = [
-        "https://api.mainnet-beta.solana.com",
-        "https://rpc.ankr.com/solana",
-        "https://solana-mainnet.phantom.app"
-    ]
-   
-    while True:
-        for rpc_url in rpc_urls:
-            try:
-                async with AsyncClient(rpc_url) as client:
-                    added = await get_new_tokens_helius(client)
-                   
-                    now = time.time()
-                    processed_tokens = 0
-                    for mint in list(ready_queue):
-                        if processed_tokens >= 5:  # Limit tokens processed per cycle
-                            break
-                        await process_token(mint, now)
-                        processed_tokens += 1
-                    
-                    log.info(f"Scanner cycle completed: {added} new tokens detected, {processed_tokens} processed")
-                    break  # Successfully completed a cycle
-            
-            except Exception as e:
-                if "429" in str(e):
-                    log.error(f"Rate limited on {rpc_url}, waiting 30 seconds")
-                    await asyncio.sleep(30)  # Longer wait when rate limited
-                else:
-                    log.error(f"Scanner failed with RPC {rpc_url}: {e}")
-                    await asyncio.sleep(5)  # Short wait for other errors
-                continue
-        
-        # Longer delay between full scan cycles
-        await asyncio.sleep(20)
+    log.info("Starting 2025 pump.fun API scanner (zero 429s)")
+    async with aiohttp.ClientSession() as session:
+        while True:
+            await get_new_tokens_pumpfun_api(session)
+
+            now = time.time()
+            for mint in list(ready_queue):
+                if mint in token_db and not token_db[mint]["alerted"]:
+                    await process_token(mint, now)
+
+            await asyncio.sleep(9) 
 # ---------------------------------------------------------------------------
 # ALERTS
 # ---------------------------------------------------------------------------
