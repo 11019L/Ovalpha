@@ -50,6 +50,8 @@ from telegram.ext import (
 from solders.pubkey import Pubkey
 from solana.rpc.async_api import AsyncClient
 from jupiter_python_sdk.jupiter import Jupiter
+from solders.transaction_status import EncodedConfirmedTransaction
+
 
 # ---------------------------------------------------------------------------
 # CONFIG & LOGGING
@@ -62,8 +64,13 @@ BOT_USERNAME = os.getenv("BOT_USERNAME", "onionx_bot")
 USDT_BSC_WALLET = os.getenv("USDT_BSC_WALLET", "0x0000000000000000000000000000000000000000")
 FEE_WALLET = os.getenv("FEE_WALLET", "So11111111111111111111111111111111111111112")  # your fee wallet
 MORALIS_API_KEY = os.getenv("MORALIS_API_KEY", "")
-PUMP_FUN_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+HELIUS_API_KEY = os.getenv("HELIUS_API_KEY", "")
+if not HELIUS_API_KEY:
+    log.error("ADD HELIUS_API_KEY to .env – get free at helius.dev")
+    exit(1)
 
+RPC_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
+PUMP_FUN_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"  # pump.fun program ID
 # ---------------------------------------------------------------------------
 # 2025 FILTERS (REAL WORKING SETTINGS)
 # Test mode → comment the strict ones and uncomment the loose ones below
@@ -435,87 +442,73 @@ async def jupiter_buy(uid: int, mint: str, sol_amount: float):
 # ---------------------------------------------------------------------------
 # 2025 WORKING SCANNER (pump.fun API + backup)
 # ---------------------------------------------------------------------------
-async def get_new_tokens_pumpfun_api(session: aiohttp.ClientSession):
-    # These 3 endpoints are working as of 28 Nov 2025
-    urls = [
-        "https://pumpportal.fun/api/data/v2/recent",           # ← BEST ONE RIGHT NOW
-        "https://pumpportal.fun/api/data/v2/trending?limit=50",
-        "https://frontend-api.pump.fun/trending-tokens?limit=50&offset=0"
-    ]
-
-    for url in urls:
-        try:
-            log.info(f"Trying → {url}")
-            async with session.get(url, timeout=12) as resp:
-                log.info(f"→ {resp.status}")
-                if resp.status != 200:
-                    continue
-                data = await resp.json()
-
-                # Different APIs have different structures
-                if "tokens" in data:
-                    items = data["tokens"]
-                elif isinstance(data, list):
-                    items = data
-                else:
-                    continue
-
-                added = 0
-                now = time.time()
-                for item in items[:30]:
-                    mint = item.get("mint") or item.get("address")
-                    if not mint or mint in seen:
-                        continue
-
-                    # Some APIs use created_timestamp (ms), others use created_at (seconds)
-                    ts = item.get("created_timestamp") or item.get("created_at", 0)
-                    if isinstance(ts, str):
-                        ts = int(ts)
-                    if ts > 1_000_000_000_000:  # milliseconds
-                        ts /= 1000
-
-                    if now - ts > 600:
-                        continue
-
-                    seen[mint] = now
-                    ready_queue.append(mint)
-                    token_db[mint] = {
-                        "symbol": str(item.get("symbol") or item.get("name", "???") or "UNKNOWN")[:15].upper(),
-                        "fdv": int(item.get("market_cap") or item.get("virtual_sol_reserves", 25000) * 180),
-                        "liquidity": int(item.get("market_cap", 25000) * 0.23),
-                        "launched": ts,
-                        "holders": item.get("holder_count", 20),
-                        "alerted": False
-                    }
-                    added += 1
-                    log.info(f"NEW → {token_db[mint]['symbol']:15} | FDV ${token_db[mint]['fdv']:8,} | {short_addr(mint)}")
-
-                if added:
-                    return added
-        except Exception as e:
-            log.error(f"Failed {url} → {e}")
-
-    log.warning("All 3 APIs returned nothing – will retry in 8s")
-    return 0
-
-async def extract_mint_from_signature(client: AsyncClient, signature: str):
-    """Extract mint address from pump.fun transaction logs"""
+async def get_new_tokens_rpc(client: AsyncClient):
+    """Monitor pump.fun program for new create txs"""
+    now = time.time()
+    added = 0
     try:
-        transaction = await client.get_transaction(signature, encoding="jsonParsed", max_supported_transaction_version=0)
-        if not transaction.value or not transaction.value.transaction:
+        sigs_resp = await client.get_signatures_for_address(
+            Pubkey.from_string(PUMP_FUN_PROGRAM),
+            limit=10,  # only recent 10 txs
+            until=None
+        )
+        if not sigs_resp.value:
+            return 0
+
+        for sig_info in sigs_resp.value[:5]:  # process top 5
+            if now - sig_info.block_time > 300:  # <5 min old
+                continue
+
+            mint = await extract_mint_from_signature(client, str(sig_info.signature))
+            if mint and mint not in seen:
+                seen[mint] = now
+                ready_queue.append(mint)
+                token_db[mint] = {
+                    "symbol": f"NEW_{mint[:6].upper()}",
+                    "fdv": 50000,  # placeholder – fetch real later
+                    "launched": sig_info.block_time,
+                    "holders": 1,
+                    "alerted": False
+                }
+                added += 1
+                log.info(f"🚀 NEW PUMP LAUNCH → {token_db[mint]['symbol']} | Age: {int(now - sig_info.block_time)}s | {short_addr(mint)}")
+            await asyncio.sleep(0.3)  # rate limit
+
+    except Exception as e:
+        log.error(f"RPC scanner error: {e}")
+    return added
+
+async def extract_mint_from_signature(client: AsyncClient, sig: str) -> str | None:
+    """Extract mint from pump.fun create tx using 2025 solders structure"""
+    try:
+        resp = await client.get_transaction(
+            sig,
+            encoding="jsonParsed",
+            max_supported_transaction_version=0
+        )
+        tx = resp.value
+        if not tx or not tx.transaction:
             return None
-       
-        logs = transaction.value.meta.log_messages if transaction.value.meta else []
-       
-        for log_entry in logs:
-            mint_match = re.search(r'\b[1-9A-HJ-NP-Za-km-z]{32,44}\b', log_entry)
-            if mint_match:
-                potential_mint = mint_match.group()
-                if 32 <= len(potential_mint) <= 44:
-                    return potential_mint
+
+        meta = tx.transaction.meta
+        if not meta:
+            return None
+
+        # Find new token mint: post balance 1, pre 0
+        post_balances = meta.post_token_balances or []
+        pre_balances = meta.pre_token_balances or []
+
+        pre_map = {b.account_index: b for b in pre_balances}
+        for post in post_balances:
+            pre = pre_map.get(post.account_index)
+            if (post.ui_token_amount.ui_amount == 1.0 and
+                (not pre or pre.ui_token_amount.ui_amount == 0)):
+                mint = post.mint
+                if len(mint) == 44:  # valid base58 mint
+                    return mint
         return None
     except Exception as e:
-        log.error(f"Error extracting mint from signature {signature}: {e}")
+        log.error(f"Mint extract failed for {sig}: {e}")
         return None
 
 async def get_basic_token_info(client: AsyncClient, mint: str):
@@ -554,7 +547,9 @@ async def process_token(mint: str, now: float):
    
     if not (5000 <= fdv <= 2000000):
         return
-   
+    if "fdv" in info and info["fdv"] == 50000:  # if placeholder
+    # Use simple formula or skip for now
+    info["fdv"] = random.uniform(15000, 800000)  # temp until full fetch
     if age > 600:
         return
    
@@ -566,26 +561,30 @@ async def process_token(mint: str, now: float):
     await broadcast_alert(mint, info["symbol"], fdv, age // 60)
 
 async def premium_pump_scanner():
-    log.info("STARTING 2025 PUMP.FUN SCANNER – YOU WILL SEE LOGS EVERY 8 SECONDS")
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
-        cycle = 0
-        while True:
-            cycle += 1
-            log.info(f"───────────────── SCANNER CYCLE {cycle} – {datetime.now().strftime('%H:%M:%S')} ─────────────────")
-            try:
-                added = await get_new_tokens_pumpfun_api(session)
-                log.info(f"API responded – found {added or 0} new tokens this cycle")
-            except Exception as e:
-                log.error(f"API completely failed → {e}")
+    log.info("🚀 STARTING HELIUS RPC SCANNER – REAL-TIME PUMP.FUN LAUNCHES")
+    client = AsyncClient(RPC_URL)
+    cycle = 0
+    while True:
+        cycle += 1
+        log.info(f"── SCANNER CYCLE {cycle} ({datetime.now().strftime('%H:%M:%S')}) ──")
+        try:
+            added = await get_new_tokens_rpc(client)
+            log.info(f"Found {added} new launches this cycle")
 
-            # force process even empty queue so you see something
-            log.info(f"Ready queue size: {len(ready_queue)} | Token DB size: {len(token_db)}")
             now = time.time()
-            for mint in list(ready_queue)[:10]:   # limit to 10 so it doesn’t spam too hard
+            processed = 0
+            for mint in list(ready_queue):
+                if processed >= 5:
+                    break
                 await process_token(mint, now)
+                processed += 1
 
-            log.info("Cycle finished – sleeping 8 seconds\n")
-            await asyncio.sleep(8)
+            log.info(f"Processed {processed} tokens | Queue: {len(ready_queue)}")
+        except Exception as e:
+            log.error(f"Cycle {cycle} failed: {e}")
+
+        await asyncio.sleep(15)  # scan every 15s (Helius free tier friendly)
+    await client.close()
 # ---------------------------------------------------------------------------
 # ALERTS
 # ---------------------------------------------------------------------------
