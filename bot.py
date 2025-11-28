@@ -440,38 +440,42 @@ async def get_new_tokens_helius(client: AsyncClient):
     added = 0
    
     try:
+        # Only request a very small number of recent signatures to minimize transaction fetches
         signatures_response = await client.get_signatures_for_address(
             Pubkey.from_string(PUMP_FUN_PROGRAM_ID),
-            limit=10,  # Reduced from 30 to decrease request volume
+            limit=5,  # Reduced to only 5 signatures per cycle
             until=None
         )
        
+        processed_count = 0
         for sig_info in signatures_response.value:
             if now - sig_info.block_time > 600:  # Only process tokens less than 10 minutes old
                 continue
-               
-            # Add delay between transaction fetches to avoid rate limits
-            await asyncio.sleep(0.2)  # 200ms delay between each transaction fetch
+            
+            processed_count += 1
+            if processed_count > 3:  # Only process up to 3 signatures per cycle
+                break
+            
+            # Add a longer delay between transaction fetches
+            await asyncio.sleep(0.5)  # 500ms delay between each transaction fetch
                
             mint = await extract_mint_from_signature(client, sig_info.signature)
             if mint and mint not in seen:
-                token_info = await get_basic_token_info(client, mint)
-                if token_info:
-                    fdv = token_info.get("fdv", 0)
-                    if 1000 <= fdv <= 3000000:
-                        seen[mint] = now
-                        ready_queue.append(mint)
-                        token_db[mint] = {
-                            "symbol": token_info.get("symbol", "UNKNOWN"),
-                            "fdv": fdv,
-                            "launched": sig_info.block_time,
-                            "alerted": False,
-                            "liquidity": token_info.get("liquidity", 0),
-                            "vol_5m": 0,
-                            "holders": token_info.get("holders", 5)
-                        }
-                        added += 1
-                        log.info(f"NEW TOKEN ADDED: {token_db[mint]['symbol']} | FDV: ${fdv:,.0f} | Age: {int(now - sig_info.block_time)}s")
+                # Skip detailed token info fetching for now to reduce requests
+                # Just add the mint to the queue with basic information
+                seen[mint] = now
+                ready_queue.append(mint)
+                token_db[mint] = {
+                    "symbol": f"TOKEN_{mint[:6].upper()}",
+                    "fdv": 50000,  # Default FDV value
+                    "launched": sig_info.block_time,
+                    "alerted": False,
+                    "liquidity": 10000,  # Default liquidity
+                    "vol_5m": 0,
+                    "holders": 10  # Default holder count
+                }
+                added += 1
+                log.info(f"NEW TOKEN DETECTED: {short_addr(mint)} | Age: {int(now - sig_info.block_time)}s")
    
     except Exception as e:
         log.error(f"Error in get_new_tokens_helius: {e}")
@@ -546,7 +550,7 @@ async def process_token(mint: str, now: float):
     await broadcast_alert(mint, info["symbol"], fdv, age // 60)
 
 async def premium_pump_scanner():
-    """Main scanner loop with rate limiting"""
+    """Main scanner loop with aggressive rate limiting"""
     log.info("Starting premium pump scanner")
    
     rpc_urls = [
@@ -562,21 +566,27 @@ async def premium_pump_scanner():
                     added = await get_new_tokens_helius(client)
                    
                     now = time.time()
+                    processed_tokens = 0
                     for mint in list(ready_queue):
+                        if processed_tokens >= 5:  # Limit tokens processed per cycle
+                            break
                         await process_token(mint, now)
-                   
-                    log.info(f"Scanner cycle completed: {added} new tokens processed")
-                    break  # Successfully completed a cycle, move to next
-           
+                        processed_tokens += 1
+                    
+                    log.info(f"Scanner cycle completed: {added} new tokens detected, {processed_tokens} processed")
+                    break  # Successfully completed a cycle
+            
             except Exception as e:
                 if "429" in str(e):
-                    log.error(f"Rate limited on {rpc_url}, waiting 10 seconds before retry")
-                    await asyncio.sleep(10)  # Wait longer when rate limited
+                    log.error(f"Rate limited on {rpc_url}, waiting 30 seconds")
+                    await asyncio.sleep(30)  # Longer wait when rate limited
                 else:
                     log.error(f"Scanner failed with RPC {rpc_url}: {e}")
+                    await asyncio.sleep(5)  # Short wait for other errors
                 continue
-       
-        await asyncio.sleep(10)
+        
+        # Longer delay between full scan cycles
+        await asyncio.sleep(20)
 # ---------------------------------------------------------------------------
 # ALERTS
 # ---------------------------------------------------------------------------
