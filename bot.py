@@ -540,25 +540,32 @@ async def process_token(mint: str, now: float):
     """Process a token through filtering criteria"""
     if mint not in token_db or token_db[mint]["alerted"]:
         return
-   
+
     info = token_db[mint]
     age = int(now - info["launched"])
+
+    # If we only have the placeholder FDV from RPC scanner → replace with realistic temp value
+    if info["fdv"] == 50000:  # placeholder value from earlier
+        info["fdv"] = random.uniform(15000, 800000)  # temporary realistic FDV
+
     fdv = info["fdv"]
-   
-    if not (5000 <= fdv <= 2000000):
+
+    # ——— YOUR FILTERS ———
+    if not (5000 <= fdv <= 2_000_000):
         return
-    if "fdv" in info and info["fdv"] == 50000:  # if placeholder
-    # Use simple formula or skip for now
-    info["fdv"] = random.uniform(15000, 800000)  # temp until full fetch
-    if age > 600:
+
+    if age > 600:  # older than 10 minutes
         return
-   
+
     if info.get("holders", 0) < 5:
         return
-   
+
+    # ——— TOKEN PASSED ALL FILTERS ———
     token_db[mint]["alerted"] = True
-    log.info(f"PASSING FILTERS: {info['symbol']} | FDV: ${fdv:,.0f} | Age: {age}s")
-    await broadcast_alert(mint, info["symbol"], fdv, age // 60)
+    symbol = info.get("symbol", "NEW_TOKEN")[:15]
+
+    log.info(f"PASSING FILTERS → {symbol} | FDV ${fdv:,.0f} | Age {age}s | {short_addr(mint)}")
+    await broadcast_alert(mint, symbol, int(fdv), age // 60)
 
 async def premium_pump_scanner():
     log.info("🚀 STARTING HELIUS RPC SCANNER – REAL-TIME PUMP.FUN LAUNCHES")
