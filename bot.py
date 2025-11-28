@@ -18,8 +18,7 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 
-logger = logging.getLogger("onion")
-def validate_environment():
+log = logging.getLogger("onion")  # This line ensures 'log' is available globallydef validate_environment():
     required_vars = ["BOT_TOKEN"]
     missing_vars = []
     
@@ -463,7 +462,7 @@ async def get_new_tokens_helius(client: AsyncClient):
                             "holders": token_info.get("holders", 5)
                         }
                         added += 1
-                        logger.info(f"NEW TOKEN ADDED: {token_db[mint]['symbol']} | FDV: ${fdv:,.0f} | Age: {int(now - sig_info.block_time)}s")
+                        log.info(f"NEW TOKEN ADDED: {token_db[mint]['symbol']} | FDV: ${fdv:,.0f} | Age: {int(now - sig_info.block_time)}s")
     
     except Exception as e:
         logger.error(f"Error in get_new_tokens_helius: {e}")
