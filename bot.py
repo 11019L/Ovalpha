@@ -50,10 +50,9 @@ from telegram.ext import (
 from solders.pubkey import Pubkey
 from solders.signature import Signature
 from solders.transaction_status import (
-    TransactionConfirmationStatus,
     UiTransactionEncoding,
-    EncodedTransactionWithStatusMeta,   # ← NEW correct type
-    TransactionStatusMeta,  
+    EncodedTransactionWithStatusMeta,
+    TransactionMeta,  # ← THIS IS THE CORRECT ONE NOW (not TransactionStatusMeta)
 )
 from jupiter_python_sdk.jupiter import Jupiter
 
@@ -490,32 +489,25 @@ async def extract_mint_from_signature(client: AsyncClient, sig: str) -> str | No
             encoding=UiTransactionEncoding.JsonParsed,
             max_supported_transaction_version=0
         )
-
-        tx = resp.value
-        if not tx:
+        if not resp.value:
             return None
 
-        # 2025 way: tx is EncodedTransactionWithStatusMeta
-        transaction_with_meta: EncodedTransactionWithStatusMeta = tx
-        meta: TransactionStatusMeta = transaction_with_meta.transaction.meta
+        tx = resp.value  # EncodedTransactionWithStatusMeta
+        meta: TransactionMeta = tx.transaction.meta  # ← FIXED: TransactionMeta
         if not meta:
             return None
 
-        pre_balances = meta.pre_token_balances or []
-        post_balances = meta.post_token_balances or []
-
-        pre_map = {b.account_index: b for b in pre_balances}
-        for post in post_balances:
-            pre = pre_map.get(post.account_index)
+        pre = {b.account_index: b for b in (meta.pre_token_balances or [])}
+        for post in (meta.post_token_balances or []):
+            pre_bal = pre.get(post.account_index)
             if (post.ui_token_amount.ui_amount == 1.0 and
-                (not pre or pre.ui_token_amount.ui_amount == 0)):
-                mint = str(post.mint)
-                if len(mint) == 44:
-                    return mint
+                (not pre_bal or pre_bal.ui_token_amount.ui_amount == 0)):
+                mint_str = str(post.mint)
+                if len(mint_str) == 44:
+                    return mint_str
         return None
-
     except Exception as e:
-        log.error(f"extract_mint failed for {sig}: {e}")
+        log.error(f"extract_mint failed {sig}: {e}")
         return None
 
 async def get_basic_token_info(client: AsyncClient, mint: str):
