@@ -540,14 +540,17 @@ async def premium_pump_scanner():
     log.info("Starting 2025 pump.fun API scanner (zero 429s)")
     async with aiohttp.ClientSession() as session:
         while True:
-            await get_new_tokens_pumpfun_api(session)
+            log.debug("Scanner tick – fetching new launches...")   # ← ADD THIS LINE
+            added = await get_new_tokens_pumpfun_api(session)
+            if added:
+                log.info(f"Scanner found {added} new token(s) this cycle")
 
             now = time.time()
             for mint in list(ready_queue):
                 if mint in token_db and not token_db[mint]["alerted"]:
                     await process_token(mint, now)
 
-            await asyncio.sleep(9) 
+            await asyncio.sleep(9)
 # ---------------------------------------------------------------------------
 # ALERTS
 # ---------------------------------------------------------------------------
