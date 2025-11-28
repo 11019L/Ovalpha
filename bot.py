@@ -470,8 +470,7 @@ async def get_new_tokens_helius(client: AsyncClient):
                         log.info(f"NEW TOKEN ADDED: {token_db[mint]['symbol']} | FDV: ${fdv:,.0f} | Age: {int(now - sig_info.block_time)}s")
     
     except Exception as e:
-        logger.error(f"Error in get_new_tokens_helius: {e}")
-    
+        log.error(f"Error in get_new_tokens_helius: {e}")  # Changed logger to log
     return added
 
 async def extract_mint_from_signature(client: AsyncClient, signature: str):
@@ -494,7 +493,7 @@ async def extract_mint_from_signature(client: AsyncClient, signature: str):
                     return potential_mint
         return None
     except Exception as e:
-        logger.error(f"Error extracting mint from signature {signature}: {e}")
+        log.error(f"Error extracting mint from signature {signature}: {e}")  # Changed logger to log
         return None
 
 async def get_basic_token_info(client: AsyncClient, mint: str):
@@ -520,7 +519,7 @@ async def get_basic_token_info(client: AsyncClient, mint: str):
             }
         return None
     except Exception as e:
-        logger.error(f"Error getting token info for {mint}: {e}")
+        log.error(f"Error getting token info for {mint}: {e}")  # Changed logger to log
         return None
 
 async def premium_pump_scanner():
