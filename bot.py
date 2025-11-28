@@ -442,13 +442,16 @@ async def get_new_tokens_helius(client: AsyncClient):
     try:
         signatures_response = await client.get_signatures_for_address(
             Pubkey.from_string(PUMP_FUN_PROGRAM_ID),
-            limit=30,
+            limit=10,  # Reduced from 30 to decrease request volume
             until=None
         )
        
         for sig_info in signatures_response.value:
-            if now - sig_info.block_time > 600:
+            if now - sig_info.block_time > 600:  # Only process tokens less than 10 minutes old
                 continue
+               
+            # Add delay between transaction fetches to avoid rate limits
+            await asyncio.sleep(0.2)  # 200ms delay between each transaction fetch
                
             mint = await extract_mint_from_signature(client, sig_info.signature)
             if mint and mint not in seen:
@@ -543,34 +546,37 @@ async def process_token(mint: str, now: float):
     await broadcast_alert(mint, info["symbol"], fdv, age // 60)
 
 async def premium_pump_scanner():
-    """Main scanner loop"""
+    """Main scanner loop with rate limiting"""
     log.info("Starting premium pump scanner")
-    
+   
     rpc_urls = [
         "https://api.mainnet-beta.solana.com",
         "https://rpc.ankr.com/solana",
         "https://solana-mainnet.phantom.app"
     ]
-    
+   
     while True:
         for rpc_url in rpc_urls:
             try:
                 async with AsyncClient(rpc_url) as client:
                     added = await get_new_tokens_helius(client)
-                    
+                   
                     now = time.time()
-                    # Process tokens in ready queue
                     for mint in list(ready_queue):
                         await process_token(mint, now)
-                    
+                   
                     log.info(f"Scanner cycle completed: {added} new tokens processed")
                     break  # Successfully completed a cycle, move to next
-            
+           
             except Exception as e:
-                log.error(f"Scanner failed with RPC {rpc_url}: {e}")
+                if "429" in str(e):
+                    log.error(f"Rate limited on {rpc_url}, waiting 10 seconds before retry")
+                    await asyncio.sleep(10)  # Wait longer when rate limited
+                else:
+                    log.error(f"Scanner failed with RPC {rpc_url}: {e}")
                 continue
-        
-        await asyncio.sleep(30)  # Scan every 30 seconds
+       
+        await asyncio.sleep(10)
 # ---------------------------------------------------------------------------
 # ALERTS
 # ---------------------------------------------------------------------------
