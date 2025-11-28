@@ -52,7 +52,7 @@ from solders.signature import Signature
 from solders.transaction_status import (
     UiTransactionEncoding,
     EncodedTransactionWithStatusMeta,
-    TransactionMeta,  # ← THIS IS THE CORRECT ONE NOW (not TransactionStatusMeta)
+    UiTransactionStatusMeta,  # ← THIS IS THE CORRECT META TYPE
 )
 from jupiter_python_sdk.jupiter import Jupiter
 
@@ -492,8 +492,8 @@ async def extract_mint_from_signature(client: AsyncClient, sig: str) -> str | No
         if not resp.value:
             return None
 
-        tx = resp.value  # EncodedTransactionWithStatusMeta
-        meta: TransactionMeta = tx.transaction.meta  # ← FIXED: TransactionMeta
+        tx: EncodedTransactionWithStatusMeta = resp.value
+        meta: UiTransactionStatusMeta = tx.transaction.meta  # ← FIXED: UiTransactionStatusMeta
         if not meta:
             return None
 
@@ -727,6 +727,10 @@ async def main():
         import traceback
         traceback.print_exc()
         raise
+async def test_imports():
+    from solders.transaction_status import UiTransactionStatusMeta
+    log.info("✅ SOLDERS FIXED – UiTransactionStatusMeta imported successfully")
+asyncio.create_task(test_imports())
 
 if __name__ == "__main__":
     try:
