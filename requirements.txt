@@ -1,6 +1,7 @@
 python-telegram-bot==20.8
 aiohttp
 jupiter-python-sdk
-solders
+solders>=0.21.0
+solana>=0.32.0
 python-dotenv
 cryptography
