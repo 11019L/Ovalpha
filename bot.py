@@ -49,11 +49,7 @@ from telegram.ext import (
 )
 from solders.pubkey import Pubkey
 from solders.signature import Signature
-from solders.transaction_status import (
-    UiTransactionEncoding,
-    EncodedTransactionWithStatusMeta,
-    UiTransactionStatusMeta,  # ← THIS IS THE CORRECT META TYPE
-)
+from solders.transaction_status import UiTransactionEncoding
 from jupiter_python_sdk.jupiter import Jupiter
 
 
