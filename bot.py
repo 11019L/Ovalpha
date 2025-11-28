@@ -19,16 +19,21 @@ logging.basicConfig(
 )
 
 log = logging.getLogger("onion")  # This line ensures 'log' is available globallydef validate_environment():
+   
+def validate_environment():
     required_vars = ["BOT_TOKEN"]
     missing_vars = []
-    
+   
     for var in required_vars:
         if not os.getenv(var):
             missing_vars.append(var)
-    
+   
     if missing_vars:
         raise RuntimeError(f"Missing required environment variables: {', '.join(missing_vars)}")
 
+# Call validation right after load_dotenv()
+load_dotenv()
+validate_environment()
 # Call validation right after load_dotenv()
 load_dotenv()
 validate_environment()
