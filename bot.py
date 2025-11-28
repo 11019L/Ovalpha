@@ -537,20 +537,26 @@ async def process_token(mint: str, now: float):
     await broadcast_alert(mint, info["symbol"], fdv, age // 60)
 
 async def premium_pump_scanner():
-    log.info("Starting 2025 pump.fun API scanner (zero 429s)")
-    async with aiohttp.ClientSession() as session:
+    log.info("STARTING 2025 PUMP.FUN SCANNER – YOU WILL SEE LOGS EVERY 8 SECONDS")
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
+        cycle = 0
         while True:
-            log.debug("Scanner tick – fetching new launches...")   # ← ADD THIS LINE
-            added = await get_new_tokens_pumpfun_api(session)
-            if added:
-                log.info(f"Scanner found {added} new token(s) this cycle")
+            cycle += 1
+            log.info(f"───────────────── SCANNER CYCLE {cycle} – {datetime.now().strftime('%H:%M:%S')} ─────────────────")
+            try:
+                added = await get_new_tokens_pumpfun_api(session)
+                log.info(f"API responded – found {added or 0} new tokens this cycle")
+            except Exception as e:
+                log.error(f"API completely failed → {e}")
 
+            # force process even empty queue so you see something
+            log.info(f"Ready queue size: {len(ready_queue)} | Token DB size: {len(token_db)}")
             now = time.time()
-            for mint in list(ready_queue):
-                if mint in token_db and not token_db[mint]["alerted"]:
-                    await process_token(mint, now)
+            for mint in list(ready_queue)[:10]:   # limit to 10 so it doesn’t spam too hard
+                await process_token(mint, now)
 
-            await asyncio.sleep(9)
+            log.info("Cycle finished – sleeping 8 seconds\n")
+            await asyncio.sleep(8)
 # ---------------------------------------------------------------------------
 # ALERTS
 # ---------------------------------------------------------------------------
